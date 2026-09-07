@@ -1,0 +1,586 @@
+#!/usr/bin/env python3
+"""
+GFS CTF keyword screening.
+
+    python gfs_ctf_script.py
+    python gfs_ctf_script.py --transactions Aug.csv --output Aug_out.csv
+
+FILES
+    Mapping_CTF.xlsx
+        P1 : RT Type | Countries
+        P2 : RT Type | Keyword | Message | Rules   (+ optional Status)
+    Intelligence_Lists.xlsx
+        Lists : List | Value                       (+ optional Status)
+
+RULE GRAMMAR
+    ACTION _ TEST _ TAG : ARGS         everything after ACTION is optional
+
+    ACTION  EXCL    do not flag this hit
+            RETAIN  flag it, stop checking further rules
+            REVIEW  send to an analyst instead of dropping
+
+    TAG     INDIV / CORP   the party the keyword hit is a natural person / a corporate,
+                           read from ENTITY_TYPE_ORIG and ENTITY_TYPE_BENE.
+                           PP and PM are accepted as aliases for INDIV and CORP.
+            NAME / REF     the hit landed in a name column / a reference column
+            no tag         wherever the keyword was found
+
+    TEST    (none)         nothing beyond the tag
+            STRADDLE       match spans two words     CRISTAL HOLDING -> "AL HOL"
+            PART_OF_WORD   match sits inside a word  ISLAMABAD, GAZAN, AFGHANATAN
+            SURNAME        match is in the surname   MEHMET KURDOGLU
+            CONTAINS:A|B   the column contains any of these
+            FLOW:A>B|C>D   the payment is one of these party-type flows,
+                           e.g. FLOW:INDIV>INDIV|INDIV>CORP
+            ON_<LIST>      the keyword itself is on that list, or inside an entry
+            IN_<LIST>      something else in the column is on that list
+
+    Rules are checked LEFT TO RIGHT; the first one that fires decides the hit.
+    Put RETAIN rules first. Nothing fires -> the hit is flagged.
+    WORD_ONLY anywhere in the cell switches that keyword to whole-word matching.
+
+    Examples
+        EXCL_INDIV                      hit is in a natural person's name
+        EXCL_CORP                       hit is in a corporate's name
+        EXCL_SURNAME_INDIV              and it is that person's surname
+        EXCL_FLOW:INDIV>INDIV           natural person to natural person
+        EXCL_ON_TOPONYM                 the keyword is a place name
+        EXCL_IN_BANK_CORP               the corporate is a banking institution
+        RETAIN_REF                      always flag when it is in the reference
+
+PARTY TYPE AND BLANKS
+    ENTITY_TYPE_ORIG / ENTITY_TYPE_BENE hold INDIV or CORP. Either may be blank,
+    independently. A blank NEVER satisfies an exclusion - the rule does not fire
+    and the transaction is flagged. "We cannot tell" must not become "do not flag".
+    A FLOW test needs both sides, so a blank on either kills it. The blank rate is
+    printed every run: it is the share of the population your party-type rules
+    cannot reach.
+
+OUTPUT
+    One row per flagged MESSAGE_KEY: every input column, then KEYWORD, RT_TYPE,
+    MATCHED_COLUMN, matched_iso, DISPOSITION, RULE_APPLIED.
+
+    A message whose every hit was excluded is NOT written at all. On the messages
+    that are written, KEYWORD / MATCHED_COLUMN / RULE_APPLIED describe only the
+    hits that survived - the ones that put the message in the report. A keyword
+    excluded on the same message is left out, so the row cannot point an analyst
+    at a column where nothing suspicious is.
+
+    The FLOW test still uses party types; FLOW is simply no longer a column.
+"""
+
+import argparse
+import re
+import sys
+import unicodedata
+from pathlib import Path
+
+import pandas as pd
+
+# ---------------------------------------------------------------- CONFIG
+TRANSACTIONS_FILE = "Sample_14082026.csv"
+MAPPING_FILE = "Mapping_CTF.xlsx"
+INTELLIGENCE_FILE = "Intelligence_Lists.xlsx"
+OUTPUT_FILE = "Sample_14082026_final_screening_output.csv"
+
+SHEET_COUNTRIES = "P1"
+SHEET_KEYWORDS = "P2"
+SHEET_INTELLIGENCE = "Lists"
+
+COL_RT, COL_COUNTRIES = "RT Type", "Countries"
+COL_KEYWORD, COL_MESSAGE, COL_RULES, COL_STATUS = "Keyword", "Message", "Rules", "Status"
+COL_LIST, COL_VALUE = "List", "Value"
+
+ID_COL = "MESSAGE_KEY"
+
+COUNTRY_COLS = ["ORIGINATOR_FI_COUNTRY_CD", "BENEFICIARY_FI_COUNTRY_CD"]
+
+ORIGINATOR_NAME_COLUMN = "ORIGINATOR_NAME"
+BENEFICIARY_NAME_COLUMN = "BENEFICIARY_NAME"
+NAME_COLUMNS = [ORIGINATOR_NAME_COLUMN, BENEFICIARY_NAME_COLUMN]
+
+# name column -> the column holding that party's type
+PARTY_TYPE_COLUMNS = {
+    ORIGINATOR_NAME_COLUMN: "ENTITY_TYPE_ORIG",
+    BENEFICIARY_NAME_COLUMN: "ENTITY_TYPE_BENE",
+}
+PARTY_TYPE_MAP = {"INDIV": "INDIV", "CORP": "CORP"}          # extract value -> canonical
+PARTY_TYPE_TAGS = {"INDIV": "INDIV", "CORP": "CORP",         # rule suffix -> canonical
+                   "PP": "INDIV", "PM": "CORP"}              # aliases, GFS document wording
+
+# which columns each non-party tag covers
+# CHECK THIS: REF should be your remittance / description column. MESSAGE_KEY is
+# the row identifier, so a keyword will never hit it and RETAIN_REF can never fire.
+COLUMN_TAGS = {
+    "REF": ["MESSAGE_KEY"],
+    "NAME": [ORIGINATOR_NAME_COLUMN, BENEFICIARY_NAME_COLUMN],
+}
+
+EXCLUDED_INSTITUTIONS = ["BNPAFR"]
+FI_KEY_PAIRS = [
+    ("ORIGINATOR_FI_ORG_KEY", "ORIGINATOR_FI_COUNTRY_CD"),
+    ("BENEFICIARY_FI_ORG_KEY", "BENEFICIARY_FI_COUNTRY_CD"),
+]
+
+PARTICLES = {"AL", "EL", "BEN", "BIN", "IBN", "ABU", "DE", "DA", "DI", "VAN", "VON", "DER", "LA"}
+SPLIT_RE = re.compile(r"[,;/|\n]+")
+
+ACTIONS = {"EXCL": "EXCLUDED", "RETAIN": "ALERT", "REVIEW": "REVIEW"}
+BUILTIN_TESTS = {"", "STRADDLE", "PART_OF_WORD", "SURNAME", "CONTAINS", "FLOW"}
+
+# column order after the input columns
+FINAL_COLS = ["KEYWORD", "RT_TYPE", "MATCHED_COLUMN", "matched_iso", "DISPOSITION", "RULE_APPLIED"]
+
+LISTS = {}
+LIST_SIZE = {}
+
+
+# ----------------------------------------------------------------- text
+def norm(value):
+    if value is None:
+        return ""
+    text = str(value)
+    if not text or text.lower() in ("nan", "none"):
+        return ""
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(c for c in text if not unicodedata.combining(c)).upper()
+    return re.sub(r"\s+", " ", re.sub(r"[^0-9A-Z ]+", " ", text)).strip()
+
+
+def build_pattern(keyword, word_only):
+    core = r"\s*".join(re.escape(t) for t in keyword.split())
+    if word_only:
+        core = r"(?<![0-9A-Z])" + core + r"(?![0-9A-Z])"
+    return re.compile(core)
+
+
+def match_shape(text, start, end):
+    left = start == 0 or text[start - 1] == " "
+    right = end == len(text) or text[end] == " "
+    if left and right:
+        return "whole"
+    return "straddle" if " " in text[start:end] else "part_of_word"
+
+
+def best_match(text, pattern):
+    rank = {"whole": 0, "part_of_word": 1, "straddle": 2}
+    best = None
+    for m in pattern.finditer(text):
+        shape = match_shape(text, m.start(), m.end())
+        if best is None or rank[shape] < rank[best[2]]:
+            best = (m.start(), m.end(), shape, m.group(0))
+    return best
+
+
+def surname_span(name):
+    spans = [(m.start(), m.end()) for m in re.finditer(r"\S+", name)]
+    if not spans:
+        return (0, 0)
+    words = name.split()
+    i = len(words) - 1
+    while i - 1 >= 1 and words[i - 1] in PARTICLES:
+        i -= 1
+    return (spans[i][0], spans[-1][1])
+
+
+def on_list(hit, name):
+    pattern = LISTS.get(name)
+    if not pattern:
+        return False
+    for m in pattern.finditer(hit["text"]):
+        if m.start() <= hit["start"] and m.end() >= hit["end"]:
+            return True
+    return False
+
+
+def in_list(hit, name):
+    pattern = LISTS.get(name)
+    return bool(pattern and pattern.search(hit["text"]))
+
+
+# --------------------------------------------------------- intelligence
+def load_intelligence(path):
+    if not Path(path).exists():
+        print(f"WARNING: no intelligence file at {path} - ON_/IN_ rules will not be available")
+        return
+    book = pd.ExcelFile(path)
+    if SHEET_INTELLIGENCE not in book.sheet_names:
+        sys.exit(f"ERROR: {path} has no sheet named '{SHEET_INTELLIGENCE}' "
+                 f"(it has: {', '.join(book.sheet_names)})")
+
+    frame = book.parse(SHEET_INTELLIGENCE, dtype=str).fillna("")
+    absent = [c for c in (COL_LIST, COL_VALUE) if c not in frame.columns]
+    if absent:
+        sys.exit(f"ERROR: sheet '{SHEET_INTELLIGENCE}' of {path} is missing column(s): {absent}")
+
+    if COL_STATUS in frame.columns:
+        status = frame[COL_STATUS].str.strip().str.upper()
+        frame = frame[status.eq("") | status.isin(["ACTIVE", "Y", "YES", "1", "TRUE"])]
+
+    grouped = {}
+    for list_name, value in zip(frame[COL_LIST], frame[COL_VALUE]):
+        name, entry = norm(list_name).replace(" ", "_"), norm(value)
+        if name and entry:
+            grouped.setdefault(name, set()).add(entry)
+
+    reserved = set(COLUMN_TAGS) | set(PARTY_TYPE_TAGS)
+    for name, entries in grouped.items():
+        for tag in reserved:
+            if name.endswith("_" + tag):
+                sys.exit(f"ERROR: list '{name}' ends with the tag '{tag}' - rename it, it would "
+                         f"be unreadable in a rule name")
+        ordered = sorted(entries, key=len, reverse=True)
+        LISTS[name] = re.compile(
+            r"(?<![0-9A-Z])(?:" + "|".join(re.escape(e) for e in ordered) + r")(?![0-9A-Z])")
+        LIST_SIZE[name] = len(ordered)
+
+    if not LISTS:
+        print(f"WARNING: no values loaded from sheet '{SHEET_INTELLIGENCE}' of {path}")
+
+
+def check_lists(keywords):
+    used = set()
+    for spec in keywords:
+        for _action, test, _tag, _args in spec["rules"]:
+            if test.startswith(("ON_", "IN_")):
+                used.add(test[3:])
+    for name in sorted(set(LISTS) - used):
+        print(f"WARNING: list '{name}' has {LIST_SIZE[name]} value(s) but no rule uses it - "
+              f"check the {COL_LIST} column for a typo")
+
+
+# ---------------------------------------------------------------- rules
+def parse_rule(token, where):
+    name, _, arg = token.partition(":")
+    name = name.strip().upper()
+    args = [a.strip().upper() for a in arg.split("|") if a.strip()]
+
+    tag = ""
+    for candidate in sorted(list(COLUMN_TAGS) + list(PARTY_TYPE_TAGS), key=len, reverse=True):
+        if name.endswith("_" + candidate):
+            name, tag = name[: -(len(candidate) + 1)], candidate
+            break
+
+    action, _, test = name.partition("_")
+    if action not in ACTIONS:
+        raise ValueError(f"'{action}' is not a valid action - use EXCL, RETAIN or REVIEW")
+
+    if test.startswith(("ON_", "IN_")):
+        list_name = test[3:]
+        if list_name not in LISTS:
+            known = ", ".join(sorted(LISTS)) or "none loaded"
+            raise ValueError(f"list '{list_name}' is not in the {COL_LIST} column of {where} "
+                             f"(available: {known})")
+    elif test in LISTS:
+        raise ValueError(f"'{test}' is a list - write ON_{test} (the keyword is one) "
+                         f"or IN_{test} (something else in the column is one)")
+    elif test not in BUILTIN_TESTS:
+        raise ValueError(f"'{test}' is not a valid test for {action}")
+
+    if test == "CONTAINS" and not args:
+        raise ValueError("CONTAINS needs arguments, e.g. EXCL_CONTAINS_CORP:HOLDING|LLC")
+    if test == "FLOW":
+        if not args:
+            raise ValueError("FLOW needs arguments, e.g. EXCL_FLOW:INDIV>INDIV|INDIV>CORP")
+        valid = set(PARTY_TYPE_MAP.values())
+        for want in args:
+            sides = want.replace("/", ">").split(">")
+            bad = [s for s in sides if s not in valid and PARTY_TYPE_TAGS.get(s) not in valid]
+            if len(sides) != 2 or bad:
+                raise ValueError(f"'{want}' is not a valid flow - use "
+                                 f"{'/'.join(sorted(valid))} either side of '>', "
+                                 f"e.g. FLOW:INDIV>CORP")
+    return action, test, tag, args
+
+
+def parse_rules(cell, where):
+    rules, word_only = [], False
+    for token in str(cell or "").split(","):
+        token = token.strip()
+        if not token or token.lower() in ("nan", "none"):
+            continue
+        if token.upper() == "WORD_ONLY":
+            word_only = True
+            continue
+        rules.append(parse_rule(token, where))
+    return rules, word_only
+
+
+def rule_fires(test, tag, args, hit):
+    # the tag decides whether this rule looks at this hit at all
+    if tag in PARTY_TYPE_TAGS:
+        # a blank or unrecognised party type never satisfies an exclusion
+        if hit["party_type"] != PARTY_TYPE_TAGS[tag]:
+            return False
+    elif tag and hit["field"] not in COLUMN_TAGS[tag]:
+        return False
+
+    if test == "":
+        return True
+    if test == "STRADDLE":
+        return hit["shape"] == "straddle"
+    if test == "PART_OF_WORD":
+        return hit["shape"] == "part_of_word"
+    if test == "SURNAME":
+        return hit["in_surname"]
+    if test == "CONTAINS":
+        return any(norm(a) in hit["text"] for a in args)
+    if test == "FLOW":
+        if not hit["flow"]:                       # either side blank -> cannot tell -> do not fire
+            return False
+        wanted = {PARTY_TYPE_TAGS.get(s, s) for want in args
+                  for s in [want.replace("/", ">")]}
+        return hit["flow"] in wanted
+    if test.startswith("ON_"):
+        return on_list(hit, test[3:])
+    if test.startswith("IN_"):
+        return in_list(hit, test[3:])
+    return False
+
+
+def decide(hit, rules):
+    for action, test, tag, args in rules:
+        if rule_fires(test, tag, args, hit):
+            return ACTIONS[action], "_".join(p for p in (action, test, tag) if p)
+    return "ALERT", ""
+
+
+# -------------------------------------------------------------- mapping
+def load_mapping(path, intelligence_path):
+    sheets = pd.read_excel(path, sheet_name=[SHEET_COUNTRIES, SHEET_KEYWORDS], dtype=str)
+    p1, p2 = sheets[SHEET_COUNTRIES].fillna(""), sheets[SHEET_KEYWORDS].fillna("")
+
+    countries = {}
+    for _, row in p1.iterrows():
+        rt = str(row[COL_RT]).strip()
+        if rt:
+            codes = {c.strip().upper() for c in SPLIT_RE.split(str(row[COL_COUNTRIES])) if c.strip()}
+            countries.setdefault(rt, set()).update(codes)
+
+    keywords = []
+    for i, row in p2.iterrows():
+        rt, keyword = str(row[COL_RT]).strip(), str(row[COL_KEYWORD]).strip()
+        if not rt or not keyword:
+            continue
+        if COL_STATUS in p2.columns:
+            status = str(row[COL_STATUS]).strip().upper()
+            if status and status not in ("ACTIVE", "Y", "YES", "1", "TRUE"):
+                continue
+        try:
+            rules, word_only = parse_rules(row[COL_RULES] if COL_RULES in p2.columns else "",
+                                           intelligence_path)
+        except ValueError as exc:
+            sys.exit(f"ERROR in sheet {SHEET_KEYWORDS} row {i + 2} ({keyword}): {exc}")
+        keywords.append({
+            "rt": rt, "keyword": keyword, "keyword_norm": norm(keyword),
+            "fields": [f.strip() for f in SPLIT_RE.split(str(row[COL_MESSAGE])) if f.strip()],
+            "rules": rules, "word_only": word_only,
+        })
+    return countries, keywords
+
+
+# ----------------------------------------------------------- party type
+def resolve_party_types(df):
+    """Read ENTITY_TYPE_ORIG / ENTITY_TYPE_BENE. Blank stays blank on purpose."""
+    types = {}
+    for name_col, type_col in PARTY_TYPE_COLUMNS.items():
+        raw = df[type_col].astype(str).str.strip().str.upper()
+        values = raw.map(lambda v: PARTY_TYPE_MAP.get(v, ""))
+
+        unexpected = sorted({r for r, v in zip(raw, values) if r and not v})
+        if unexpected:
+            print(f"WARNING: '{type_col}' has value(s) {unexpected} not in PARTY_TYPE_MAP - "
+                  f"treated as unknown, so party-type rules will not fire on them")
+        blank = int(values.eq("").sum())
+        if len(df):
+            print(f"  {type_col:<20}: {blank:,} of {len(df):,} rows have no usable party type "
+                  f"({blank / len(df):.1%})")
+        types[name_col] = values
+
+    orig, bene = types[ORIGINATOR_NAME_COLUMN], types[BENEFICIARY_NAME_COLUMN]
+    flow = pd.Series(["" if not o or not b else f"{o}>{b}" for o, b in zip(orig, bene)],
+                     index=df.index)
+    if len(df):
+        unknown = int(flow.eq("").sum())
+        print(f"  {'flow unknown':<20}: {unknown:,} of {len(df):,} rows ({unknown / len(df):.1%}) "
+              f"- FLOW rules cannot fire on these")
+    return types, flow
+
+
+# ------------------------------------------------------------ pre-checks
+def drop_own_institution(df, transactions_file):
+    if not EXCLUDED_INSTITUTIONS:
+        return df, 0
+    codes = {re.sub(r"[^0-9A-Z]", "", str(c).upper()) for c in EXCLUDED_INSTITUTIONS}
+    missing = sorted({c for pair in FI_KEY_PAIRS for c in pair if c not in df.columns})
+    if missing:
+        sys.exit(f"ERROR: EXCLUDED_INSTITUTIONS is set but these columns are not in "
+                 f"{transactions_file}: {missing}")
+
+    def clean(series):
+        return series.map(lambda v: re.sub(r"[^0-9A-Z]", "", str(v).upper()))
+
+    drop = pd.Series(False, index=df.index)
+    for key_col, country_col in FI_KEY_PAIRS:
+        key, country = clean(df[key_col]), clean(df[country_col])
+        odd = key[key.str.len().ne(4) & key.ne("")]
+        if len(odd):
+            print(f"WARNING: {len(odd):,} value(s) in '{key_col}' are not 4 characters "
+                  f"(e.g. {odd.iloc[0]!r}) - the first 4 are used to build the BIC")
+        drop |= (key.str[:4] + country.str[:2]).isin(codes)
+    return df[~drop].reset_index(drop=True), int(drop.sum())
+
+
+def check_columns(df, keywords, transactions_file):
+    tagged = {col for cols in COLUMN_TAGS.values() for col in cols}
+    searched = {f for k in keywords for f in k["fields"]}
+    required = {ID_COL, *COUNTRY_COLS, *NAME_COLUMNS, *PARTY_TYPE_COLUMNS.values(),
+                *tagged, *searched}
+    missing = sorted(c for c in required if c and c not in df.columns)
+    if missing:
+        sys.exit(f"ERROR: these columns are not in {transactions_file}: {missing}")
+
+    for col in sorted(tagged - searched):
+        tags = [t for t, cols in COLUMN_TAGS.items() if col in cols]
+        print(f"WARNING: '{col}' is tagged {tags} but no keyword searches it - "
+              f"rules using that tag can never fire on it")
+    for col in sorted(searched - tagged):
+        print(f"WARNING: '{col}' is searched but has no tag in COLUMN_TAGS - "
+              f"only untagged rules will apply to its hits")
+
+
+# ----------------------------------------------------------------- main
+def screen(transactions_file, mapping_file, intelligence_file, output_file):
+    load_intelligence(intelligence_file)
+    countries, keywords = load_mapping(mapping_file, intelligence_file)
+    check_lists(keywords)
+
+    df = pd.read_csv(transactions_file, dtype=str, keep_default_na=False).fillna("")
+    rows_read = len(df)
+    df, dropped = drop_own_institution(df, transactions_file)
+    check_columns(df, keywords, transactions_file)
+
+    print("\nParty type:")
+    types, flow = resolve_party_types(df)
+
+    tag_of = {}
+    for tag, cols in COLUMN_TAGS.items():
+        for col in cols:
+            tag_of.setdefault(col, tag)
+    name_cols = set(NAME_COLUMNS)
+
+    text_cols = sorted({f for k in keywords for f in k["fields"]})
+    normed = {c: df[c].map(norm) for c in text_cols}
+
+    upper = {c: df[c].str.strip().str.upper() for c in COUNTRY_COLS}
+    scope = {}
+    for rt, codes in countries.items():
+        mask = pd.Series(False, index=df.index)
+        for col in COUNTRY_COLS:
+            mask |= upper[col].isin(codes)
+        scope[rt] = mask
+
+    rows = []
+    for spec in keywords:
+        in_scope = scope.get(spec["rt"])
+        if in_scope is None or not in_scope.any() or not spec["keyword_norm"]:
+            continue
+        pattern = build_pattern(spec["keyword_norm"], spec["word_only"])
+        for field in spec["fields"]:
+            series = normed[field]
+            for i in df.index[series.str.contains(pattern.pattern, regex=True) & in_scope]:
+                text = series[i]
+                found = best_match(text, pattern)
+                if not found:
+                    continue
+                start, end, shape, matched = found
+                sur_start, sur_end = surname_span(text) if field in name_cols else (0, 0)
+                hit = {
+                    "field": field, "text": text, "start": start, "end": end, "shape": shape,
+                    "in_surname": start < sur_end and end > sur_start,
+                    "party_type": types[field][i] if field in types else "",
+                    "flow": flow[i],
+                }
+                disposition, rule = decide(hit, spec["rules"])
+                rows.append({
+                    "_row": i,
+                    "KEYWORD": spec["keyword"],
+                    "RT_TYPE": spec["rt"],
+                    "COLUMN": field,
+                    "DISPOSITION": disposition,
+                    "RULE_APPLIED": rule,
+                })
+
+    hits = pd.DataFrame(rows) if rows else pd.DataFrame(
+        columns=["_row", "KEYWORD", "RT_TYPE", "COLUMN", "DISPOSITION", "RULE_APPLIED"])
+
+    if hits.empty:
+        out = pd.DataFrame(columns=list(df.columns) + FINAL_COLS)
+    else:
+        disp_priority = {"ALERT": 0, "REVIEW": 1, "EXCLUDED": 2}
+
+        def get_best_disp(series):
+            return min(series, key=lambda x: disp_priority.get(x, 3))
+
+        # the message's disposition is the strongest of its hits; a message whose
+        # every hit was excluded drops out of the file entirely
+        best = hits.groupby("_row")["DISPOSITION"].transform(get_best_disp)
+        survivors = hits[hits["DISPOSITION"].eq(best) & best.ne("EXCLUDED")]
+
+        if survivors.empty:
+            out = pd.DataFrame(columns=list(df.columns) + FINAL_COLS)
+        else:
+            grouped_hits = survivors.groupby("_row").agg({
+                "KEYWORD": lambda x: ", ".join(sorted(set(x))),
+                "RT_TYPE": lambda x: ", ".join(sorted(set(x))),
+                "COLUMN": lambda x: ", ".join(sorted(set(x))),
+                "DISPOSITION": "first",
+                "RULE_APPLIED": lambda x: ", ".join(sorted(set(filter(None, x)))),
+            }).reset_index().rename(columns={"COLUMN": "MATCHED_COLUMN"})
+
+            base = df.loc[grouped_hits["_row"]].reset_index(drop=True)
+            detail = grouped_hits.drop(columns=["_row"]).reset_index(drop=True)
+            out = pd.concat([base, detail], axis=1)
+
+            def get_combined_iso(row):
+                isos = [str(row[col]).strip().upper() for col in COUNTRY_COLS
+                        if str(row[col]).strip()]
+                return ", ".join(sorted(set(isos)))
+
+            out["matched_iso"] = out.apply(get_combined_iso, axis=1)
+            out = out[list(df.columns) + FINAL_COLS]      # one fixed column order, always
+
+    out.to_csv(output_file, index=False)
+
+    lists_loaded = ", ".join(f"{n} ({LIST_SIZE[n]})" for n in sorted(LIST_SIZE)) or "none"
+    print(f"\nIntelligence lists  : {lists_loaded}")
+    print(f"Rows read           : {rows_read:,}")
+    if dropped:
+        print(f"  dropped as own FI : {dropped:,} ({', '.join(EXCLUDED_INSTITUTIONS)})")
+    print(f"Rows screened       : {len(df):,}")
+    print(f"Raw hits            : {len(hits):,}")
+    for disposition in ("ALERT", "REVIEW", "EXCLUDED"):
+        n = int((hits["DISPOSITION"] == disposition).sum()) if len(hits) else 0
+        print(f"  {disposition:<10}: {n:,}")
+    messages_hit = hits["_row"].nunique() if len(hits) else 0
+    print(f"Messages with a hit : {messages_hit:,}")
+    print(f"Messages written    : {len(out):,}"
+          + (f"  ({messages_hit - len(out):,} fully excluded, not written)"
+             if messages_hit > len(out) else ""))
+    if len(hits):
+        counts = hits[hits["RULE_APPLIED"] != ""]["RULE_APPLIED"].value_counts()
+        if len(counts):
+            print("\nDecided by rule (all hits, including excluded ones):")
+            for rule, count in counts.items():
+                print(f"  {rule:<34} {count:,}")
+    print(f"\nWritten to {output_file}\n")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--transactions", default=TRANSACTIONS_FILE)
+    parser.add_argument("--mapping", default=MAPPING_FILE)
+    parser.add_argument("--intelligence", default=INTELLIGENCE_FILE)
+    parser.add_argument("--output", default=OUTPUT_FILE)
+    args = parser.parse_args()
+    screen(args.transactions, args.mapping, args.intelligence, args.output)
