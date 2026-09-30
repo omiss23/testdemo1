@@ -1,0 +1,918 @@
+ATTENDANCE TRACKER - STEP-BY-STEP BUILD GUIDE
+Build it by hand in Excel, starting from a blank workbook.
+Excel 2010 or later (desktop). No macros. No Microsoft 365-only functions.
+Every formula in this file was tested in a working copy of the tracker.
+
+CONTENTS
+  Part 0   Read this first
+  Part 1   Create the workbook and the sheets
+  Part 2   Named ranges (41 names)
+  Part 3   Codes sheet
+  Part 4   Setup sheet
+  Part 5   Employee Master sheet
+  Part 6   Dashboard filter cells (top rows only)
+  Part 7   Helper sheet (hidden calculations)
+  Part 8   Dropdowns (data validation)
+  Part 9   First month tab: Jan-2026
+  Part 10  Other month tabs (copies of Jan-2026)
+  Part 11  Dashboard: month table, KPI cards, charts
+  Part 12  Warning colours on Employee Master, Setup and Codes
+  Part 13  Protection and finishing
+  Part 14  Test it (with expected results)
+  Part 15  Everyday rules and adding a new year
+  Appendix A  Colour list (Hex and RGB)
+  Appendix B  Troubleshooting
+
+
+############################################################################
+PART 0 - READ THIS FIRST
+############################################################################
+
+What you are building
+  Dashboard        Year / Month / Team / Sub Team filters, 6 KPI cards,
+                   a month-wise table and 2 charts
+  Employee Master  ID, Employee Name, Team, Sub Team, Manager, Status (200 rows)
+  Setup            Team + Sub Team pairs, holidays, years
+  Codes            Attendance codes and what each one counts as
+  Helper           Hidden sheet that builds the dropdown lists
+  Jan-2026 ...     One tab per month (build Jan-2026 once, then copy it)
+
+How it works, in one paragraph
+  Each month tab has one row per employee (row 10 = 1st employee of the Master,
+  row 11 = 2nd, and so on) and one column per day (G = day 1 ... AK = day 31).
+  You pick a code in each day cell. Columns AL:AQ count each employee's Present,
+  Leave, Early Morning, Late Evening, Holiday and Week Off days, using the Codes
+  tab to know what each code counts as. The Dashboard finds each month tab by its
+  name (e.g. Jan-2026) and adds up those columns for the selected Team / Sub Team.
+
+How to read this guide
+  - Every line that STARTS with "=" is a formula. Copy the whole line, click the
+    cell named just above it, paste (Ctrl+V) and press Enter.
+    In Notepad, turn OFF Format > Word Wrap so each formula stays on one line.
+  - "Type" means enter the text or number exactly as shown.
+  - Fill down: select the formula cell together with the empty cells below it and
+    press Ctrl+D. Fill right: the same across a row, press Ctrl+R.
+  - To select a big range fast: click the Name Box (small box left of the formula
+    bar), type the range (for example B10:F209) and press Enter.
+  - Sheet names, header words marked IMPORTANT and the code words must be spelled
+    exactly as shown (spaces and hyphens matter).
+  - Formulas use commas between arguments (English Excel). If your Excel uses
+    semicolons as the list separator, replace those commas with semicolons.
+  - Colours are Hex codes: Fill Color > More Colors > Custom. Excel 2016+ has a
+    Hex box; for older versions use the RGB numbers in Appendix A. Plain fill
+    colours are cosmetic (skip them if short on time). The colour RULES in
+    Part 9.10 are what colour the codes, weekends and holidays.
+  - Do the parts in order. The named ranges (Part 2) come early so that every
+    formula works the moment you enter it.
+
+Time needed: about 2 to 3 hours.
+
+
+############################################################################
+PART 1 - CREATE THE WORKBOOK AND THE SHEETS
+############################################################################
+
+1.1  Open a new blank workbook and save it as  Attendance_Tracker.xlsx
+1.2  (Optional) Workbook font: Home > Cell Styles > right-click "Normal" >
+     Modify > Format > Font: Arial, Size 10 > OK > OK.
+1.3  Create these 6 sheets, in this order, named exactly (right-click a tab >
+     Rename; the + button next to the tabs adds a sheet):
+        Dashboard
+        Employee Master
+        Setup
+        Codes
+        Helper
+        Jan-2026
+     The other month tabs are created in Part 10 by copying Jan-2026.
+1.4  (Optional) Tab colours: right-click a tab > Tab Color. See Appendix A.
+
+
+############################################################################
+PART 2 - NAMED RANGES (41 NAMES)
+############################################################################
+
+Formulas > Name Manager > New... For each name below:
+  Name:       type the name exactly as shown
+  Scope:      Workbook
+  Refers to:  select everything in the box, delete it, then paste the line that
+              starts with "="
+  Click OK.
+Tip: while the cursor is in "Refers to", don't press the arrow keys (Excel would
+insert cell references). Just paste and click OK.
+Some names point at cells that are still empty - that is expected.
+
+--- Codes tab - the code table and each code slot (used by counts, colours, dropdown) ---
+Name: CodeRange
+=Codes!$B$4:$B$15
+Name: CatRange
+=Codes!$D$4:$D$15
+Name: ShiftRange
+=Codes!$E$4:$E$15
+Name: code_1
+=Codes!$B$4
+Name: code_2
+=Codes!$B$5
+Name: code_3
+=Codes!$B$6
+Name: code_4
+=Codes!$B$7
+Name: code_5
+=Codes!$B$8
+Name: code_6
+=Codes!$B$9
+Name: code_7
+=Codes!$B$10
+Name: code_8
+=Codes!$B$11
+Name: code_9
+=Codes!$B$12
+Name: code_10
+=Codes!$B$13
+Name: code_11
+=Codes!$B$14
+Name: code_12
+=Codes!$B$15
+Name: CodeList
+=OFFSET(Helper!$R$6,0,0,MAX(1,SUMPRODUCT(--(LEN(Helper!$R$6:$R$17)>0))),1)
+
+--- Lists behind the dropdowns (they read the Helper sheet) ---
+Name: TeamList
+=OFFSET(Helper!$C$6,0,0,MAX(1,SUMPRODUCT(--(LEN(Helper!$C$6:$C$105)>0))),1)
+Name: TeamListDash
+=OFFSET(Helper!$C$5,0,0,SUMPRODUCT(--(LEN(Helper!$C$5:$C$105)>0)),1)
+Name: SubTeamList
+=OFFSET(Helper!$E$6,0,0,MAX(1,SUMPRODUCT(--(LEN(Helper!$E$6:$E$105)>0))),1)
+Name: SubTeamListDash
+=OFFSET(Helper!$G$5,0,0,SUMPRODUCT(--(LEN(Helper!$G$5:$G$105)>0)),1)
+Name: YearList
+=OFFSET(Setup!$H$6,0,0,MAX(1,COUNT(Setup!$H$6:$H$40)),1)
+Name: MonthListAll
+=Helper!$I$5:$I$17
+Name: MonthNames
+=Helper!$J$6:$J$17
+Name: StatusList
+=Helper!$K$6:$K$7
+Name: CategoryList
+=Helper!$L$6:$L$10
+Name: ShiftList
+=Helper!$M$6:$M$7
+
+--- Setup tab lists ---
+Name: HolidayDates
+=Setup!$E$6:$E$55
+Name: SetupTeam
+=Setup!$B$6:$B$105
+Name: SetupSub
+=Setup!$C$6:$C$105
+
+--- Employee Master columns (rows 5 to 204) ---
+Name: MasterID
+='Employee Master'!$B$5:$B$204
+Name: MasterName
+='Employee Master'!$C$5:$C$204
+Name: MasterTeam
+='Employee Master'!$D$5:$D$204
+Name: MasterSub
+='Employee Master'!$E$5:$E$204
+Name: MasterMgr
+='Employee Master'!$F$5:$F$204
+Name: MasterStatus
+='Employee Master'!$G$5:$G$204
+
+--- Dashboard filter cells and filter criteria ---
+Name: YearSel
+=Dashboard!$B$5
+Name: MonthSel
+=Dashboard!$D$5
+Name: TeamSel
+=Dashboard!$F$5
+Name: SubSel
+=Dashboard!$H$5
+Name: TeamCrit
+=Helper!$O$6
+Name: SubCrit
+=Helper!$O$7
+
+Check: Formulas > Name Manager now lists 41 names.
+
+
+############################################################################
+PART 3 - CODES SHEET
+############################################################################
+
+3.1  Column widths (right-click the column letter > Column Width):
+       A = 2    B = 12    C = 34    D = 14    E = 16
+3.2  B2  type:  Leave & Attendance Codes      (bold, size 14, font colour 1F7A3F)
+3.3  Headers in row 3 (fill 1F7A3F, white bold text, centred):
+       B3 Code      C3 Meaning      D3 Counts as      E3 Shift
+3.4  Type the code table. "(blank)" means leave the cell empty.
+       Row  B (Code)  C (Meaning)                     D (Counts as)  E (Shift)
+       4    RT_1      Regular Time Present            Present        (blank)
+       5    RT_0      Regular Time Absent             Leave          (blank)
+       6    RT_EM     Regular Time Early Morning      Present        Early Morning
+       7    RT_LE     Regular Time Late Evening       Present        Late Evening
+       8    RT_SH     Regular Time Statutory Holiday  Holiday        (blank)
+       9    WO        Week Off                        Week Off       (blank)
+     Rows 10 to 15 stay empty - they are 6 spare slots for future codes.
+     IMPORTANT: column D words must be one of  Present / Leave / Holiday /
+     Week Off / Other  and column E one of  Early Morning / Late Evening  (or
+     blank). Part 8 adds dropdowns so you can't misspell them.
+3.5  Slot colours - fill each Code cell (B4:B15) with its slot colour. On the
+     month tabs a code is coloured with the colour of the row it sits in here:
+       B4  B4C6E7    B5  F6D08B    B6  B3E0D6    B7  D4C5F0
+       B8  C6E0B4    B9  D9D9D9    B10 A9D18E    B11 F4B6B6
+       B12 FFF2A8    B13 F8CBAD    B14 F2C4DA    B15 D9C3A5
+3.6  Fill C4:E15 light yellow FFF7D6 (input cells). Thin borders on B3:E15.
+     Centre B4:E15, make B4:B15 bold.
+3.7  (Optional) note in B17: "Counts as decides which total a code adds to
+     (Other = not counted). Shift tags Early Morning / Late Evening codes; they
+     also count as Present. To retire a code, clear its cells - don't delete the
+     row."
+
+
+############################################################################
+PART 4 - SETUP SHEET
+############################################################################
+
+4.1  Column widths:  A = 2   B = 24   C = 24   D = 3   E = 14   F = 28   G = 3
+     H = 10
+4.2  B1 type: Setup  (bold 14). B2 (optional note): "Yellow cells are inputs.
+     Fill each list from the top, without gaps."
+4.3  Headers (fill 1F7A3F, white bold):
+       B5 Team     C5 Sub Team     E5 Date     F5 Holiday     H5 Year
+4.4  Teams - rows 6 to 105, one row per Team + Sub Team pair, no blank rows:
+       B6 Operations     C6 Payments        <- example, used by the example
+                                               employee in Part 5
+       B7 Operations     C7 Settlements     <- (your real pairs from here)
+       B8 FCC            C8 Sanctions
+     A team with 3 sub teams takes 3 rows.
+4.5  Holidays - dates in E6:E55, names in F6:F55. Format E6:E55 as Custom
+     dd-mmm-yyyy. Starting list (replace with your office holiday list):
+       E6  26-Jan-2026   F6  Republic Day
+       E7  15-Aug-2026   F7  Independence Day
+       E8  02-Oct-2026   F8  Gandhi Jayanti
+       E9  26-Jan-2027   F9  Republic Day
+       E10 15-Aug-2027   F10 Independence Day
+       E11 02-Oct-2027   F11 Gandhi Jayanti
+4.6  Years - H6 type 2026, H7 type 2027 (add more later, one per row, no gaps).
+4.7  Fill B6:C105, E6:F55 and H6:H40 light yellow FFF7D6. Thin borders.
+4.8  Click A6 > View > Freeze Panes > Freeze Panes.
+
+
+############################################################################
+PART 5 - EMPLOYEE MASTER SHEET
+############################################################################
+
+5.1  Column widths:  A = 5   B = 12   C = 26   D = 18   E = 18   F = 22   G = 11
+     H = 28
+5.2  A1 type: Employee Master  (bold 14)
+     A2 (note): "One row per employee (200 rows). Don't sort, cut/paste or delete
+     rows - row N here is row N on every month tab. Leavers: set Status to
+     Inactive."
+5.3  A3 - summary line:
+="Active: "&COUNTIFS(MasterID,"<>",MasterStatus,"<>Inactive")&"    |    Inactive: "&COUNTIFS(MasterID,"<>",MasterStatus,"Inactive")&"    |    Free rows: "&COUNTBLANK(MasterID)
+5.4  Headers in row 4 (fill 1F7A3F, white bold, centred):
+       A4 #   B4 ID   C4 Employee Name   D4 Team   E4 Sub Team   F4 Manager
+       G4 Status
+5.5  Row numbers: A5 type 1. Select A5 > Home > Fill > Series > Series in:
+     Columns, Step value 1, Stop value 200 > OK. (A5:A204 = 1 to 200)
+5.6  Inputs B5:G204: fill light yellow FFF7D6, thin borders.
+     Example row 5 - type:
+       B5 EMP001   C5 Priya Sharma   D5 Operations   E5 Payments
+       F5 Rahul Mehta   G5 Active
+     Overwrite it with a real employee later. Team and Sub Team must match the
+     Setup list exactly. A blank Status counts as Active.
+5.7  Click A5 > View > Freeze Panes. Select A4:G204 > Data > Filter.
+
+
+############################################################################
+PART 6 - DASHBOARD FILTER CELLS (TOP ROWS ONLY FOR NOW)
+############################################################################
+The Helper sheet uses these four cells, so they are created now.
+The rest of the Dashboard is built in Part 11.
+
+6.1  Column widths:  A = 2,  B to M = 12.5 each but K = 15,  N = 2
+6.2  B1 type: Attendance Dashboard  (bold, size 18, colour 1F7A3F)
+6.3  Labels in row 4 - type:  B4 YEAR   D4 MONTH   F4 TEAM   H4 SUB TEAM
+6.4  Filter cells in row 5 - type the starting values:
+       B5  2026
+       D5  All
+       F5  All
+       H5  All
+     Optional look: merge B5:C5, D5:E5, F5:G5 and H5:I5 (Home > Merge & Center),
+     fill FFF7D6, bold, border. The formulas only use B5, D5, F5 and H5.
+     (Their dropdowns are added in Part 8.)
+
+
+############################################################################
+PART 7 - HELPER SHEET
+############################################################################
+Builds clean lists (no duplicates, no blanks) for the dropdowns.
+You hide this sheet at the end (Part 13).
+
+7.1  (Optional) labels in row 4 so you know what each column is:
+       B4 team idx   C4 Teams   D4 sub idx   E4 Sub Teams   F4 dash sub idx
+       G4 Sub Teams (dashboard)   I4 Months   J4 Month names   K4 Status
+       L4 Counts as   M4 Shift   N4 Filter   O4 Criteria   Q4 code idx   R4 Codes
+7.2  Row 5 starting values - type:
+       B5 0    C5 All    D5 0    F5 0    G5 All    I5 All    Q5 0
+7.3  Row 6 formulas. Enter all six, then select B6:G105 and press Ctrl+D (fills
+     down to row 105 - one row per Setup row):
+B6 - marks the first time each team appears in Setup
+=IF(Setup!B6="","",IF(COUNTIF(Setup!$B$6:B6,Setup!B6)=1,MAX(B$5:B5)+1,""))
+C6 - list of unique teams
+=IFERROR(INDEX(Setup!$B$6:$B$105,MATCH(ROWS(C$6:C6),$B$6:$B$105,0)),"")
+D6 - marks the first time each sub team appears
+=IF(Setup!C6="","",IF(COUNTIF(Setup!$C$6:C6,Setup!C6)=1,MAX(D$5:D5)+1,""))
+E6 - list of unique sub teams (Employee Master dropdown)
+=IFERROR(INDEX(Setup!$C$6:$C$105,MATCH(ROWS(E$6:E6),$D$6:$D$105,0)),"")
+F6 - marks the sub teams of the team chosen on the Dashboard
+=IF(Setup!C6="","",IF(IF(TeamSel="All",COUNTIF(Setup!$C$6:C6,Setup!C6)=1,AND(Setup!B6=TeamSel,COUNTIFS(Setup!$B$6:B6,Setup!B6,Setup!$C$6:C6,Setup!C6)=1)),MAX(F$5:F5)+1,""))
+G6 - list of those sub teams (Dashboard Sub Team dropdown)
+=IFERROR(INDEX(Setup!$C$6:$C$105,MATCH(ROWS(G$6:G6),$F$6:$F$105,0)),"")
+7.4  Fixed lists - type one value per cell:
+       I6 to I17:  Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec
+       J6 to J17:  January February March April May June July August September
+                   October November December
+       K6 Active        K7 Inactive
+       L6 Present       L7 Leave     L8 Holiday     L9 Week Off     L10 Other
+       M6 Early Morning             M7 Late Evening
+       N6 TeamCrit      N7 SubCrit   (labels only)
+7.5  Filter criteria used by the Dashboard totals:
+O6
+=IF(TeamSel="All","<>#All#","="&TeamSel)
+O7
+=IF(SubSel="All","<>#All#","="&SubSel)
+     ("<>#All#" simply means "match every row" when the filter is All.)
+7.6  Code list without blanks. Enter both, then select Q6:R17 and press Ctrl+D:
+Q6
+=IF(Codes!B4="","",MAX(Q$5:Q5)+1)
+R6
+=IFERROR(INDEX(Codes!$B$4:$B$15,MATCH(ROWS(R$6:R6),$Q$6:$Q$17,0)),"")
+7.7  Check: C6 shows your first team, E6 your first sub team, R6:R11 the six
+     codes, G5 "All" followed by sub teams. Empty-looking cells are fine.
+
+
+############################################################################
+PART 8 - DROPDOWNS (DATA VALIDATION)
+############################################################################
+For each one: select the range > Data > Data Validation > Settings tab >
+Allow: List > Source: paste the line starting with "=" > OK.
+(Error Alert tab only where mentioned.)
+
+8.1  Codes sheet
+       D4:D15  Source:
+=CategoryList
+       E4:E15  Source:
+=ShiftList
+8.2  Employee Master
+       D5:D204  Source (Error Alert tab: Style = Warning):
+=TeamList
+       E5:E204  Source (Error Alert tab: Style = Warning):
+=SubTeamList
+       G5:G204  Source:
+=StatusList
+8.3  Setup
+       E6:E55  Allow: Date, between 1-Jan-2000 and 31-Dec-2100
+               (Error Alert: Style = Warning)
+       H6:H40  Allow: Whole number, between 2000 and 2100
+8.4  Dashboard (click the first cell of each yellow box)
+       B5  Source:
+=YearList
+       D5  Source:
+=MonthListAll
+       F5  Source:
+=TeamListDash
+       H5  Source:
+=SubTeamListDash
+     The Team list always starts with "All". The Sub Team list shows only the sub
+     teams of the selected Team.
+
+
+############################################################################
+PART 9 - FIRST MONTH TAB: Jan-2026
+############################################################################
+Build this one tab completely (colours and protection included).
+Every other month is a copy of it.
+
+9.1  Column widths:
+       A = 4.5   B = 10   C = 24   D = 14   E = 14   F = 16
+       G to AK = 6.2   (select columns G:AK together > right-click > Column Width)
+       AL to AQ = 9.5
+     (Optional) View > untick Gridlines; zoom 90%.
+
+9.2  Top block
+     A1 - title (optional: merge A1:F1, bold 14, colour 1F7A3F):
+=IFERROR(INDEX(MonthNames,$B$3)&" "&$B$2,"Check Year/Month")&" - Attendance"
+     A2 type: Year       B2 type: 2026   (fill FFF7D6, bold, centred)
+     A3 type: Month      B3 type: 1      (fill FFF7D6, bold, centred)
+     B2 and B3 tell the tab which month it is. They must match the tab name
+     (Jan-2026 = year 2026, month 1).
+     C2 - link back to the Dashboard:
+=HYPERLINK("#Dashboard!A1","<< Back to Dashboard")
+     C3 type (note): tab settings - change only when copying tabs for a new year
+
+9.3  Code legend in row 2
+     F2 type: Codes >>
+     Enter these 12 formulas. Give each cell the fill colour shown (the same slot
+     colours as Codes B4:B15). Font bold 8, centred.
+G2  (fill B4C6E7)
+=IF(code_1="","",code_1)
+H2  (fill F6D08B)
+=IF(code_2="","",code_2)
+I2  (fill B3E0D6)
+=IF(code_3="","",code_3)
+J2  (fill D4C5F0)
+=IF(code_4="","",code_4)
+K2  (fill C6E0B4)
+=IF(code_5="","",code_5)
+L2  (fill D9D9D9)
+=IF(code_6="","",code_6)
+M2  (fill A9D18E)
+=IF(code_7="","",code_7)
+N2  (fill F4B6B6)
+=IF(code_8="","",code_8)
+O2  (fill FFF2A8)
+=IF(code_9="","",code_9)
+P2  (fill F8CBAD)
+=IF(code_10="","",code_10)
+Q2  (fill F2C4DA)
+=IF(code_11="","",code_11)
+R2  (fill D9C3A5)
+=IF(code_12="","",code_12)
+     G3 (optional hint, can merge G3:AK3): Pick a code from the dropdown in each
+     day cell | invalid entries turn red | dark header = weekend | amber =
+     holiday | grey = not a date in this month
+
+9.4  Header row 9 - type (fill 1F7A3F, white bold, centred, Wrap Text; row
+     height 30):
+       A9 #   B9 ID   C9 Employee Name   D9 Team   E9 Sub Team   F9 Manager
+       AL9 Present   AM9 Leave   AN9 Early Morning   AO9 Late Evening
+       AP9 Holiday   AQ9 Week Off
+     IMPORTANT: AL9:AQ9 must be spelled exactly like this - the totals use these
+     words to know what to count.
+
+9.5  Dates (row 9) and weekday names (row 8)
+G9 - first day of the month
+=DATE($B$2,$B$3,1)
+H9 - next day (blank after the month ends). Then select H9:AK9 and press Ctrl+R.
+=IF(G9="","",IF(MONTH(G9+1)=$B$3,G9+1,""))
+G8 - weekday. Then select G8:AK8 and press Ctrl+R.
+=IF(G9="","",G9)
+     Number formats (Ctrl+1 > Number > Custom):
+       G9:AK9  type  d      (shows 1, 2, 3 ...)
+       G8:AK8  type  ddd    (shows Mon, Tue ...)
+     Fill G8:AK9 light green E2EFDA, bold, centred.
+     Days that don't exist in the month (e.g. 29-31 in February) stay blank.
+
+9.6  Daily headcount (rows 4 to 7)
+     Type the labels (right-aligned; optional merge C4:F4, C5:F5, C6:F6, C7:F7):
+       C4 Present     C5 Leave     C6 Early Morning     C7 Late Evening
+     IMPORTANT: the formulas read these words - spell them exactly. (Optional:
+     Custom number format  @" / day"  on C4:C7 displays "Present / day" etc.)
+G4 - Present per day. Then select G4:G5, Ctrl+D; then select G4:AK5, Ctrl+R.
+=IF(G$9="","",SUMPRODUCT(COUNTIFS(CodeRange,G$10:G$209,CatRange,$C4)*(G$10:G$209<>"")*($B$10:$B$209<>"")))
+G6 - Early Morning per day. Then select G6:G7, Ctrl+D; then select G6:AK7, Ctrl+R.
+=IF(G$9="","",SUMPRODUCT(COUNTIFS(CodeRange,G$10:G$209,ShiftRange,$C6)*(G$10:G$209<>"")*($B$10:$B$209<>"")))
+     Number format G4:AK7: Custom  0;-0;;@   (hides zeros). Font size 8.
+
+9.7  Month totals above the summary columns
+     AL7 type: Month total (visible rows)   (optional merge AL7:AQ7)
+AL8 - then select AL8:AQ8 and press Ctrl+R
+=SUBTOTAL(9,AL10:AL209)
+     These follow the filter: hide some rows with the filter and they total only
+     what is visible.
+
+9.8  Employee rows 10 to 209
+     A10 type 1. Select A10 > Home > Fill > Series > Columns, Step 1, Stop 200.
+     Row 10 formulas (they pull the Master row with the same number as column A):
+B10 - ID
+=IF(INDEX(MasterID,$A10)="","",INDEX(MasterID,$A10))
+C10 - Employee Name
+=INDEX(MasterName,$A10)&""
+D10 - Team
+=INDEX(MasterTeam,$A10)&""
+E10 - Sub Team
+=INDEX(MasterSub,$A10)&""
+F10 - Manager
+=INDEX(MasterMgr,$A10)&""
+     Then select B10:F209 and press Ctrl+D.
+     Per-employee totals (each counts the codes in G10:AK10, ignoring days that
+     don't exist in the month):
+AL10 - Present
+=IF($B10="","",SUMPRODUCT(COUNTIFS(CodeRange,$G10:$AK10,CatRange,AL$9)*($G$9:$AK$9<>"")*($G10:$AK10<>"")))
+AM10 - Leave
+=IF($B10="","",SUMPRODUCT(COUNTIFS(CodeRange,$G10:$AK10,CatRange,AM$9)*($G$9:$AK$9<>"")*($G10:$AK10<>"")))
+AN10 - Early Morning
+=IF($B10="","",SUMPRODUCT(COUNTIFS(CodeRange,$G10:$AK10,ShiftRange,AN$9)*($G$9:$AK$9<>"")*($G10:$AK10<>"")))
+AO10 - Late Evening
+=IF($B10="","",SUMPRODUCT(COUNTIFS(CodeRange,$G10:$AK10,ShiftRange,AO$9)*($G$9:$AK$9<>"")*($G10:$AK10<>"")))
+AP10 - Holiday
+=IF($B10="","",SUMPRODUCT(COUNTIFS(CodeRange,$G10:$AK10,CatRange,AP$9)*($G$9:$AK$9<>"")*($G10:$AK10<>"")))
+AQ10 - Week Off
+=IF($B10="","",SUMPRODUCT(COUNTIFS(CodeRange,$G10:$AK10,CatRange,AQ$9)*($G$9:$AK$9<>"")*($G10:$AK10<>"")))
+     Then select AL10:AQ209 and press Ctrl+D.
+     Formats:
+       AL8:AQ209  Custom  #,##0;-#,##0;"-"   (shows "-" instead of 0)
+       AL10:AQ209 fill F7F7F7. Thin light-grey borders on A10:AQ209.
+       G10:AK209 (the day grid) stays EMPTY - codes go here. Centre it.
+     The example employee from the Master now appears in row 10.
+
+9.9  Dropdowns on this tab (Data > Data Validation)
+       G10:AK209  Allow: List. Source:
+=CodeList
+                  Error Alert tab: Style Stop, Title "Not a valid code",
+                  Message "Pick a code from the dropdown."
+       B2         Allow: Whole number, between 2000 and 2100
+       B3         Allow: Whole number, between 1 and 12
+
+9.10 Colour rules (conditional formatting) - this is what colours the codes
+     To add ONE rule:
+       a) Select the range given, starting at its FIRST (top-left) cell so that
+          cell is the active one: e.g. click G10, then Shift+click AK209 - or
+          type the range in the Name Box.
+       b) Home > Conditional Formatting > New Rule > "Use a formula to determine
+          which cells to format".
+       c) Paste the formula into the box.
+       d) Format... > Fill tab: the colour (More Colors > Custom). Font tab only
+          if a font is given. OK > OK.
+     Excel puts every NEW rule at the TOP of the list, so add the rules in the
+     order below (least important first); they end up in the right order.
+
+     Rule 1 - blank legend cells show white
+       Range G2:R2     Fill FFFFFF (white)
+=G2=""
+     Rule 2 - weekend columns, light tint
+       Range G10:AK209     Fill F3F3F3
+=AND(G$9<>"",WEEKDAY(G$9,2)>5)
+     Rule 3 - holiday columns, light tint
+       Range G10:AK209     Fill FDF1E4
+=AND(G$9<>"",COUNTIF(HolidayDates,G$9)>0)
+     Rule 4 - weekend header (dark)
+       Range G8:AK9     Fill 4B5563     Font bold, white
+=AND(G$9<>"",WEEKDAY(G$9,2)>5)
+     Rule 5 - holiday header (amber)
+       Range G8:AK9     Fill F4B183     Font bold
+=AND(G$9<>"",COUNTIF(HolidayDates,G$9)>0)
+     Rules 6 to 17 - one colour per code slot. Range for all 12: G10:AK209
+     (slots 7-12 are the spare codes - add them now so a new code gets its
+     colour automatically)
+     Rule 6 - slot 1, fill B4C6E7
+=AND(G10<>"",G10=code_1)
+     Rule 7 - slot 2, fill F6D08B
+=AND(G10<>"",G10=code_2)
+     Rule 8 - slot 3, fill B3E0D6
+=AND(G10<>"",G10=code_3)
+     Rule 9 - slot 4, fill D4C5F0
+=AND(G10<>"",G10=code_4)
+     Rule 10 - slot 5, fill C6E0B4
+=AND(G10<>"",G10=code_5)
+     Rule 11 - slot 6, fill D9D9D9
+=AND(G10<>"",G10=code_6)
+     Rule 12 - slot 7, fill A9D18E
+=AND(G10<>"",G10=code_7)
+     Rule 13 - slot 8, fill F4B6B6
+=AND(G10<>"",G10=code_8)
+     Rule 14 - slot 9, fill FFF2A8
+=AND(G10<>"",G10=code_9)
+     Rule 15 - slot 10, fill F8CBAD
+=AND(G10<>"",G10=code_10)
+     Rule 16 - slot 11, fill F2C4DA
+=AND(G10<>"",G10=code_11)
+     Rule 17 - slot 12, fill D9C3A5
+=AND(G10<>"",G10=code_12)
+     Rule 18 - invalid code (red)
+       Range G10:AK209     Fill E74C3C     Font bold, white
+=AND(G10<>"",COUNTIF(CodeRange,G10)=0)
+     Rule 19 - dates that don't exist in this month (grey). Add it LAST.
+       Range G4:AK209     Fill A6A6A6
+=G$9=""
+     Check: Home > Conditional Formatting > Manage Rules > "Show formatting rules
+     for: This Worksheet". From the top it must read Rule 19, 18, 17 ... down to
+     Rule 1. Tick "Stop If True" on Rule 19 (the grey one). If the order is off,
+     select a rule and move it with the up/down arrows.
+
+9.11 Freeze panes and filter
+     Click D10 > View > Freeze Panes > Freeze Panes.
+     Select A9:AQ209 > Data > Filter.
+
+9.12 Protection - do this BEFORE copying the tab, so every copy is protected too
+     a) Select B2:B3 > Ctrl+1 > Protection tab > untick Locked > OK.
+     b) Select G10:AK209 > Ctrl+1 > Protection tab > untick Locked > OK.
+     c) Review > Protect Sheet > leave the password empty > tick: Select locked
+        cells, Select unlocked cells, Format columns, Format rows, Use AutoFilter
+        > OK.
+     This keeps the formulas safe and blocks sorting / deleting rows.
+
+9.13 (Optional) Printing: Page Layout > Orientation: Landscape; Width: 1 page,
+     Height: Automatic; Print Titles > Rows to repeat at top: $8:$9.
+
+
+############################################################################
+PART 10 - OTHER MONTH TABS (COPIES OF Jan-2026)
+############################################################################
+
+10.1 Right-click the Jan-2026 tab > Move or Copy... > Before sheet: (move to
+     end) > tick "Create a copy" > OK. A tab "Jan-2026 (2)" appears.
+10.2 Rename it Feb-2026 and type 2 in B3 (B2 stays 2026).
+10.3 Repeat for the rest of the year:
+       Mar-2026  B3 = 3       Jul-2026  B3 = 7       Nov-2026  B3 = 11
+       Apr-2026  B3 = 4       Aug-2026  B3 = 8       Dec-2026  B3 = 12
+       May-2026  B3 = 5       Sep-2026  B3 = 9
+       Jun-2026  B3 = 6       Oct-2026  B3 = 10
+     Tab name rule: Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec, a hyphen,
+     then the 4-digit year. No spaces.
+10.4 Year 2027 (now or later): click Jan-2026, Shift+click Dec-2026,
+     right-click > Move or Copy > (move to end) > tick Create a copy > OK.
+     Rename the 12 copies Jan-2027 ... Dec-2027 and set B2 = 2027 on each.
+     If any codes were typed, select G10:AK209 and press Delete on each copy.
+10.5 Every year that has tabs must be listed in Setup column H.
+
+
+############################################################################
+PART 11 - DASHBOARD: MONTH TABLE, KPI CARDS, CHARTS
+############################################################################
+
+11.1 Subtitle - B2:
+="Year "&YearSel&"   |   "&IF(MonthSel="All","All months",MonthSel)&"   |   Team: "&TeamSel&"   |   Sub Team: "&SubSel
+11.2 Warning message - J5 (optional: merge J5:M5, red bold font). It stays empty
+     unless the Sub Team doesn't belong to the Team, or no month tabs exist for
+     the selected year:
+=IF(NOT(OR(SubSel="All",AND(TeamSel="All",COUNTIF(SetupSub,SubSel)>0),COUNTIFS(SetupTeam,TeamSel,SetupSub,SubSel)>0)),"WARNING: this Sub Team is not under the selected Team - set Sub Team to All",IF(COUNTIF($J$31:$J$42,"No tab yet")=12,"WARNING: no month tabs for "&YearSel&" yet",""))
+
+11.3 Month-wise table (build it before the cards - the cards read from it)
+     B29 - table title (bold 12):
+="Month-wise summary  |  "&YearSel&"  |  "&IF(TeamSel="All","All teams",TeamSel)&IF(SubSel="All",""," / "&SubSel)
+     Row 30 headers - type (fill 1F7A3F, white bold, Wrap Text):
+       B30 Month   C30 Present   D30 Leave   E30 Early Morning   F30 Late Evening
+       G30 Holiday   H30 Week Off   I30 Attendance %   J30 Tab   K30 Check
+     B31:B42 - type Jan, Feb, Mar ... Dec (B31 = Jan, B42 = Dec).
+       IMPORTANT: exactly these 3-letter names - they build the tab names.
+     Q31:Q42 - type 1 to 12 (Q31 = 1 ... Q42 = 12). Helper column, hidden later.
+P31 - builds the tab name, e.g. 'Jan-2026'!  Then select P31:P42, Ctrl+D.
+="'"&$B31&"-"&YearSel&"'!"
+     Row 31 formulas - enter C31 to K31, then select C31:K42 and press Ctrl+D:
+C31 - Present
+=IFERROR(SUMIFS(INDIRECT($P31&"$AL$10:$AL$209"),INDIRECT($P31&"$D$10:$D$209"),TeamCrit,INDIRECT($P31&"$E$10:$E$209"),SubCrit),0)
+D31 - Leave
+=IFERROR(SUMIFS(INDIRECT($P31&"$AM$10:$AM$209"),INDIRECT($P31&"$D$10:$D$209"),TeamCrit,INDIRECT($P31&"$E$10:$E$209"),SubCrit),0)
+E31 - Early Morning
+=IFERROR(SUMIFS(INDIRECT($P31&"$AN$10:$AN$209"),INDIRECT($P31&"$D$10:$D$209"),TeamCrit,INDIRECT($P31&"$E$10:$E$209"),SubCrit),0)
+F31 - Late Evening
+=IFERROR(SUMIFS(INDIRECT($P31&"$AO$10:$AO$209"),INDIRECT($P31&"$D$10:$D$209"),TeamCrit,INDIRECT($P31&"$E$10:$E$209"),SubCrit),0)
+G31 - Holiday
+=IFERROR(SUMIFS(INDIRECT($P31&"$AP$10:$AP$209"),INDIRECT($P31&"$D$10:$D$209"),TeamCrit,INDIRECT($P31&"$E$10:$E$209"),SubCrit),0)
+H31 - Week Off
+=IFERROR(SUMIFS(INDIRECT($P31&"$AQ$10:$AQ$209"),INDIRECT($P31&"$D$10:$D$209"),TeamCrit,INDIRECT($P31&"$E$10:$E$209"),SubCrit),0)
+I31 - Attendance %
+=IF(C31+D31=0,"-",C31/(C31+D31))
+J31 - link to the month tab
+=IF(ISREF(INDIRECT($P31&"A1")),HYPERLINK("#"&$P31&"A1",$B31&"-"&YearSel&" >>"),"No tab yet")
+K31 - checks the tab's B2/B3 match its name
+=IF(ISREF(INDIRECT($P31&"A1")),IF(AND(INDIRECT($P31&"B2")=YearSel,INDIRECT($P31&"B3")=$Q31),"OK","Check B2/B3"),"")
+     Totals in row 43. B43 type: Total
+C43 - then select C43:H43, Ctrl+R
+=SUM(C31:C42)
+I43
+=IF(C43+D43=0,"-",C43/(C43+D43))
+K43
+=COUNTIF(K31:K42,"OK")&" of 12 OK"
+     Number formats: C31:H43 Custom  #,##0;-#,##0;"-"   and   I31:I43
+     Percentage with 1 decimal.
+     Hide columns P and Q: select P:Q > right-click > Hide.
+
+11.4 KPI cards (rows 7 to 9)
+     Optional look: merge B7:C7, B8:C8, B9:C9 (same for D:E, F:G, H:I, J:K, L:M),
+     fill F4F7F5, row 8 bold size 20 in the KPI colours of Appendix A.
+     Row 7 labels - type:
+       B7 EMPLOYEES   D7 PRESENT   F7 LEAVE   H7 EARLY MORNING   J7 LATE EVENING
+       L7 ATTENDANCE %
+     Row 8 formulas:
+B8 - active employees in the selected Team / Sub Team
+=SUMPRODUCT((MasterID<>"")*(MasterStatus<>"Inactive")*(((TeamSel="All")+(MasterTeam=TeamSel))>0)*(((SubSel="All")+(MasterSub=SubSel))>0))
+D8 - Present (selected month, or the whole year when Month = All)
+=IFERROR(IF(MonthSel="All",$C$43,INDEX($C$31:$C$42,MATCH(MonthSel,$B$31:$B$42,0))),0)
+F8 - Leave
+=IFERROR(IF(MonthSel="All",$D$43,INDEX($D$31:$D$42,MATCH(MonthSel,$B$31:$B$42,0))),0)
+H8 - Early Morning
+=IFERROR(IF(MonthSel="All",$E$43,INDEX($E$31:$E$42,MATCH(MonthSel,$B$31:$B$42,0))),0)
+J8 - Late Evening
+=IFERROR(IF(MonthSel="All",$F$43,INDEX($F$31:$F$42,MATCH(MonthSel,$B$31:$B$42,0))),0)
+L8 - Attendance % (format: Percentage, 1 decimal)
+=IF(D8+F8=0,"-",D8/(D8+F8))
+     Row 9 captions:
+       B9 type: active in Employee Master
+D9 - paste the same formula into F9 too
+=IF(MonthSel="All","person-days | all of "&YearSel,"person-days | "&MonthSel&" "&YearSel)
+H9 - paste the same formula into J9 too
+=IF(MonthSel="All","shifts | all of "&YearSel,"shifts | "&MonthSel&" "&YearSel)
+       L9 type: present / (present + leave)
+
+11.5 Charts
+     Chart 1: select B30:D42 > Insert > Column > Clustered Column.
+       Title: Present vs Leave by month (person-days). Move it to about B12:G27.
+       Colours (click a bar > Format Data Series > Fill > Solid fill):
+       Present 4F81BD, Leave E3A33B.
+     Chart 2: select B30:B42, hold Ctrl, select E30:F42 > Insert > Column >
+       Clustered Column. Title: Early Morning vs Late Evening shifts by month.
+       Move it to about H12:M27. Colours: Early Morning 3AA394,
+       Late Evening 8E7CC3.
+
+11.6 Colour rules on the Dashboard (Home > Conditional Formatting > New Rule >
+     "Use a formula..."). Add in this order:
+     a) Range J31:J42 - "No tab yet" in grey italics.  Font italic, colour 9CA3AF
+=J31="No tab yet"
+     b) Range K31:K42 - a failed check in orange.  Font bold, colour C55A11
+=K31="Check B2/B3"
+     c) Range B31:K42 - highlights the selected month.  Fill FFF2CC
+=AND(MonthSel<>"All",$B31=MonthSel)
+
+11.7 (Optional) Click A6 > View > Freeze Panes (filters stay visible while you
+     scroll). View > untick Gridlines.
+
+
+############################################################################
+PART 12 - WARNING COLOURS ON EMPLOYEE MASTER, SETUP AND CODES
+############################################################################
+Same method as Part 9.10 (select from the first cell, New Rule, "Use a formula").
+Add them in the order listed.
+
+Employee Master
+  1) Range A5:G204 - greys out Inactive employees.
+     Fill EDEDED, Font italic colour 8C8C8C
+=$G5="Inactive"
+  2) Range E5:E204 - Sub Team not paired with this Team in Setup.  Fill F8CBAD
+=AND($E5<>"",COUNTIFS(SetupTeam,$D5,SetupSub,$E5)=0)
+  3) Range D5:D204 - Team not in Setup.  Fill F8CBAD
+=AND($D5<>"",COUNTIF(SetupTeam,$D5)=0)
+  4) Range B5:B204 - duplicate ID.  Fill E74C3C, Font bold white
+=AND($B5<>"",COUNTIF($B$5:$B$204,$B5)>1)
+
+Setup
+  1) Range B6:C105 - Sub Team typed without a Team.  Fill F8CBAD
+=AND($C6<>"",$B6="")
+  2) Range B6:C105 - the same pair entered twice.  Fill E74C3C, Font bold white
+=AND($C6<>"",COUNTIFS($B$6:$B$105,$B6,$C$6:$C$105,$C6)>1)
+
+Codes
+  1) Range D4:D15 - a code without "Counts as".  Fill F8CBAD
+=AND($B4<>"",$D4="")
+  2) Range B4:B15 - the same code entered twice.  Fill E74C3C, Font bold white
+=AND($B4<>"",COUNTIF($B$4:$B$15,$B4)>1)
+
+
+############################################################################
+PART 13 - PROTECTION AND FINISHING
+############################################################################
+
+13.1 Month tabs: already protected (Part 9.12, before copying).
+13.2 Employee Master: select B5:G204 > Ctrl+1 > Protection > untick Locked > OK.
+     Review > Protect Sheet > no password > tick: Select locked cells, Select
+     unlocked cells, Format columns, Format rows, Use AutoFilter > OK.
+13.3 Codes: unlock B4:E15, then protect the same way.
+13.4 Setup: unlock B6:C105, E6:F55 and H6:H40, then protect - also tick "Sort"
+     so you can sort the team list.
+13.5 Dashboard: unlock B5, D5, F5 and H5 (the four yellow filter boxes), then
+     protect.
+13.6 Hide the Helper sheet: right-click its tab > Hide.
+13.7 Click the Dashboard tab and save.
+No passwords are used anywhere. To change the layout later: Review > Unprotect
+Sheet. Protection only stops accidental sorting or row deletion, which would
+misalign employees across the month tabs.
+
+
+############################################################################
+PART 14 - TEST IT (EXPECTED RESULTS)
+############################################################################
+
+14.1 Setup B6:C6 = Operations / Payments, and Employee Master row 5 = the example
+     employee (EMP001, Operations, Payments, Active).
+14.2 On Jan-2026, row 10 (EMP001), type these codes:
+       G10 RT_1   H10 RT_1   I10 WO   J10 WO   K10 RT_0   L10 RT_EM   M10 RT_LE
+     (1 and 2 Jan are Thu/Fri, 3-4 Jan the weekend, 5-7 Jan Mon-Wed.)
+14.3 Expected on Jan-2026:
+       A1 shows:  January 2026 - Attendance
+       AL10 Present       = 4   (RT_1 + RT_1 + RT_EM + RT_LE)
+       AM10 Leave         = 1
+       AN10 Early Morning = 1
+       AO10 Late Evening  = 1
+       AP10 Holiday       = -   (zero)
+       AQ10 Week Off      = 2
+       Daily rows: G4 = 1, L4 = 1, M4 = 1 (Present on 1, 6, 7 Jan),
+                   K5 = 1 (Leave on 5 Jan), L6 = 1 (Early Morning on 6 Jan),
+                   M7 = 1 (Late Evening on 7 Jan)
+       The headers of 3 and 4 January are dark (weekend); 26 January is amber.
+14.4 Dashboard: set Year 2026, Month Jan, Team All, Sub Team All:
+       EMPLOYEES 1 | PRESENT 4 | LEAVE 1 | EARLY MORNING 1 | LATE EVENING 1 |
+       ATTENDANCE % 80.0%
+       Table row Jan: 4 | 1 | 1 | 1 | - | 2 | 80.0% | Jan-2026 >> | OK
+       K43 shows "12 of 12 OK" once all twelve 2026 tabs exist.
+14.5 On Feb-2026 type RT_1 in AI10 (the column for day 29 - 2026 has no 29 Feb):
+     the cell is grey and AL10 on Feb-2026 stays "-" (not counted).
+14.6 Type XX in any day cell: Excel refuses it. If you paste it, it turns red.
+14.7 Clean up: on each tab you used, select G10:AK209 and press Delete.
+
+
+############################################################################
+PART 15 - EVERYDAY RULES AND ADDING A NEW YEAR
+############################################################################
+
+Everyday rules
+  - The 1st employee row of the Master (row 5) is row 10 on every month tab, the
+    2nd is row 11, and so on. Never sort, cut/paste or delete Master rows.
+  - Leaver: set Status = Inactive (history stays). Joiner: next empty row.
+  - Team change: the new team applies to all months. To keep past months under
+    the old team, mark the old row Inactive and add the person again in a new row.
+  - New code: use a spare row on Codes (rows 10-15), pick Counts as (and Shift).
+    It appears in every dropdown and gets that row's colour.
+  - Present = every code whose Counts as is Present (RT_1, RT_EM, RT_LE).
+    Leave = RT_0. Early Morning / Late Evening = RT_EM / RT_LE (also part of
+    Present). Attendance % = Present / (Present + Leave). Counts are person-days.
+
+Adding a new year (e.g. 2028)
+  1. Setup: add 2028 under Years (column H) and its holidays.
+  2. Click Jan-2027, Shift+click Dec-2027, right-click > Move or Copy > (move to
+     end) > tick Create a copy > OK.
+  3. On each new tab: rename to Jan-2028 ... Dec-2028, set B2 = 2028, select
+     G10:AK209 and press Delete.
+  4. The Dashboard finds the new tabs by name automatically.
+
+
+############################################################################
+APPENDIX A - COLOUR LIST (HEX AND RGB)
+############################################################################
+
+Purpose                               Hex       RGB
+Header fill (dark green)              1F7A3F    31,122,63
+Input cells (light yellow)            FFF7D6    255,247,214
+Day header rows 8-9 (light green)     E2EFDA    226,239,218
+Label cells / month totals (grey)     F2F2F2    242,242,242
+Per-employee totals AL10:AQ209        F7F7F7    247,247,247
+KPI card background                   F4F7F5    244,247,245
+Code slot 1  (RT_1)                   B4C6E7    180,198,231
+Code slot 2  (RT_0)                   F6D08B    246,208,139
+Code slot 3  (RT_EM)                  B3E0D6    179,224,214
+Code slot 4  (RT_LE)                  D4C5F0    212,197,240
+Code slot 5  (RT_SH)                  C6E0B4    198,224,180
+Code slot 6  (WO)                     D9D9D9    217,217,217
+Code slot 7  (spare)                  A9D18E    169,209,142
+Code slot 8  (spare)                  F4B6B6    244,182,182
+Code slot 9  (spare)                  FFF2A8    255,242,168
+Code slot 10 (spare)                  F8CBAD    248,203,173
+Code slot 11 (spare)                  F2C4DA    242,196,218
+Code slot 12 (spare)                  D9C3A5    217,195,165
+Rule: date not in month (grey)        A6A6A6    166,166,166
+Rule: invalid code (red)              E74C3C    231,76,60
+Rule: holiday header (amber)          F4B183    244,177,131
+Rule: weekend header (dark)           4B5563    75,85,99
+Rule: holiday column tint             FDF1E4    253,241,228
+Rule: weekend column tint             F3F3F3    243,243,243
+Rule: warning (orange)                F8CBAD    248,203,173
+Rule: inactive employee fill          EDEDED    237,237,237
+Rule: inactive employee font          8C8C8C    140,140,140
+Rule: selected month (Dashboard)      FFF2CC    255,242,204
+Rule: "Check B2/B3" font              C55A11    197,90,17
+Rule: "No tab yet" font               9CA3AF    156,163,175
+Chart: Present                        4F81BD    79,129,189
+Chart: Leave                          E3A33B    227,163,59
+Chart: Early Morning                  3AA394    58,163,148
+Chart: Late Evening                   8E7CC3    142,124,195
+KPI number: Present                   2F5597    47,85,151
+KPI number: Leave                     C55A11    197,90,17
+KPI number: Early Morning             1B7F6E    27,127,110
+KPI number: Late Evening              6B4FA0    107,79,160
+KPI number: Attendance %              1F7A3F    31,122,63
+Tab: Employee Master                  ED7D31    237,125,49
+Tab: Setup / Codes / Helper           7F7F7F    127,127,127
+Tab: 2026 months                      2F5597    47,85,151
+Tab: 2027 months                      548235    84,130,53
+
+
+############################################################################
+APPENDIX B - TROUBLESHOOTING
+############################################################################
+
+#NAME? in a cell
+  A named range is missing or misspelled. Formulas > Name Manager: compare with
+  Part 2 (41 names).
+The day-cell dropdown is empty
+  Check Codes B4:B9, the Helper columns Q and R (Part 7.6) and the name CodeList.
+A month shows "No tab yet" on the Dashboard
+  The tab name is not exactly Mon-YYYY (e.g. "Jan-2026", no spaces) or the
+  Dashboard Year is different.
+The Check column shows "Check B2/B3"
+  That tab's B2 (year) or B3 (month number) doesn't match its name.
+Team / Sub Team dropdown on the Dashboard is empty
+  Setup pairs are missing, or the Helper formulas were not filled down to row 105.
+Numbers don't change when you pick a Team
+  The team spelling in the Master must match Setup exactly (orange cells in the
+  Master point to mismatches).
+A formula shows as text instead of a result
+  The cell was formatted as Text. Set it to General, click the cell, press F2,
+  then Enter.
+Codes are not coloured
+  Check the names code_1 ... code_12 and the rule order in Part 9.10.
+Error when pasting a formula
+  Make sure the whole line was copied (Notepad: Format > Word Wrap OFF) and that
+  your Excel uses commas as the list separator (see Part 0).
+
