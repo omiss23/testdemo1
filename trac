@@ -1,0 +1,828 @@
+#!/usr/bin/env python3
+"""
+Attendance Tracker - Excel workbook builder
+-------------------------------------------
+Builds Attendance_Tracker.xlsx with these tabs:
+  Dashboard, Guide, Employee Master, Setup, Codes,
+  Jan-2026 ... Dec-2027 (one tab per month) and a hidden Helper sheet.
+No macros. The formulas only use functions available in Excel 2010 and later.
+
+Needs : Python 3.6+ and openpyxl 3.0 or newer (it comes with Anaconda).
+        Check:    python -c "import openpyxl; print(openpyxl.__version__)"
+        Install:  pip install openpyxl
+Run   : python build_attendance_tracker.py
+        python build_attendance_tracker.py D:/Reports/My_Tracker.xlsx
+Then  : open the file in Excel. All formulas calculate when it opens
+        (a few seconds); save it once.
+
+Safety: the script never overwrites an existing file (add --force if you
+really want that). Each run creates a NEW, EMPTY tracker - it does not
+update a tracker you are already using.
+"""
+import os
+import sys
+import datetime as dt
+from copy import copy
+
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Border, Side, Alignment, Protection
+    from openpyxl.utils import get_column_letter as CL
+    from openpyxl.utils.indexed_list import IndexedList
+    from openpyxl.workbook.defined_name import DefinedName
+    from openpyxl.worksheet.datavalidation import DataValidation
+    from openpyxl.worksheet.properties import PageSetupProperties
+    from openpyxl.formatting.rule import FormulaRule
+    from openpyxl.chart import BarChart, Reference
+    from openpyxl.chart.shapes import GraphicalProperties
+    from openpyxl.chart.title import Title
+    from openpyxl.chart.text import RichText, Text
+    from openpyxl.drawing.line import LineProperties
+    from openpyxl.drawing.text import (Paragraph, ParagraphProperties, CharacterProperties,
+                                       RegularTextRun, Font as DFont)
+    from openpyxl.workbook.properties import CalcProperties
+except ImportError:
+    sys.exit('This script needs the openpyxl package. Install it with:  pip install openpyxl')
+
+# ============================================================================
+# SETTINGS - optional: change these before running
+# ============================================================================
+OUTPUT_FILE = 'Attendance_Tracker.xlsx'    # created in the folder you run the script from
+YEARS = [2026, 2027]                       # 12 month tabs are created for each year
+N_EMP = 200                                # employee rows (Employee Master and every month tab)
+
+# Starting Team / Sub Team pairs for the Setup tab (more can be typed in Excel later).
+SETUP_PAIRS = [('Operations', 'Payments')]
+
+# Example employee in row 5 of the Employee Master: (ID, Name, Team, Sub Team, Manager, Status).
+# Set to None for an empty Employee Master.
+EXAMPLE_EMPLOYEE = ('EMP001', 'Priya Sharma', 'Operations', 'Payments', 'Rahul Mehta', 'Active')
+
+# Holidays as (month, day, name) - added for every year in YEARS (edit them in Setup later).
+HOLIDAY_DATES = [(1, 26, 'Republic Day'), (8, 15, 'Independence Day'), (10, 2, 'Gandhi Jayanti')]
+
+# Attendance codes: (code, meaning, counts as, shift) - at most 12.
+#   counts as: Present, Leave, Holiday, Week Off or Other
+#   shift:     Early Morning, Late Evening or '' (blank)
+CODES = [('RT_1', 'Regular Time Present', 'Present', ''),
+         ('RT_0', 'Regular Time Absent', 'Leave', ''),
+         ('RT_EM', 'Regular Time Early Morning', 'Present', 'Early Morning'),
+         ('RT_LE', 'Regular Time Late Evening', 'Present', 'Late Evening'),
+         ('RT_SH', 'Regular Time Statutory Holiday', 'Holiday', ''),
+         ('WO', 'Week Off', 'Week Off', '')]
+
+
+# ================================================================ constants
+MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+MON_FULL = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
+            'September', 'October', 'November', 'December']
+M0, M1 = 5, 4 + N_EMP    # Employee Master data rows
+G0, G1 = 10, 9 + N_EMP   # month-tab employee rows
+DAY0 = 7                 # column G = day 1
+DAYC = [CL(DAY0 + i) for i in range(31)]          # G .. AK
+SUMC = [CL(38 + i) for i in range(6)]             # AL .. AQ
+SUM_LABELS = ['Present', 'Leave', 'Early Morning', 'Late Evening', 'Holiday', 'Week Off']
+SUM_RANGE = ['CatRange', 'CatRange', 'ShiftRange', 'ShiftRange', 'CatRange', 'CatRange']
+SLOT = ['B4C6E7', 'F6D08B', 'B3E0D6', 'D4C5F0', 'C6E0B4', 'D9D9D9',
+        'A9D18E', 'F4B6B6', 'FFF2A8', 'F8CBAD', 'F2C4DA', 'D9C3A5']
+CATEGORIES = ['Present', 'Leave', 'Holiday', 'Week Off', 'Other']
+SHIFTS = ['Early Morning', 'Late Evening']
+HOLIDAYS = [(dt.date(y, m, d), n) for y in YEARS for (m, d, n) in HOLIDAY_DATES]
+LAST, NEXT = max(YEARS), max(YEARS) + 1
+GREEN, GREEN_L, INPUT = '1F7A3F', 'E2EFDA', 'FFF7D6'
+GREY_L, TXT, MUTED = 'F2F2F2', '1F2937', '6B7280'
+TAB = {'dash': '1F7A3F', 'master': 'ED7D31', 'cfg': '7F7F7F'}
+YEAR_TAB = ['2F5597', '548235']      # month-tab colours, alternating by year
+FMT_CNT = '#,##0;-#,##0;"\u2013"'
+
+# ================================================================ style helpers
+_fc = {}
+
+
+def F(size=10, bold=False, italic=False, color=TXT, underline=None):
+    k = (size, bold, italic, color, underline)
+    if k not in _fc:
+        _fc[k] = Font(name='Arial', size=size, bold=bold, italic=italic, color=color,
+                      underline=underline)
+    return _fc[k]
+
+
+def CFF(bold=False, italic=False, color=None):          # font for conditional formats
+    return Font(bold=bold, italic=italic, color=color)
+
+
+def FILL(h):
+    return PatternFill('solid', start_color=h, end_color=h)
+
+
+S_GRID = Side(style='thin', color='D9D9D9')
+S_BOX = Side(style='thin', color='BFBFBF')
+B_GRID = Border(left=S_GRID, right=S_GRID, top=S_GRID, bottom=S_GRID)
+B_BOX = Border(left=S_BOX, right=S_BOX, top=S_BOX, bottom=S_BOX)
+A_C = Alignment(horizontal='center', vertical='center')
+A_CW = Alignment(horizontal='center', vertical='center', wrap_text=True)
+A_L = Alignment(horizontal='left', vertical='center')
+A_LW = Alignment(horizontal='left', vertical='center', wrap_text=True)
+A_LT = Alignment(horizontal='left', vertical='top', wrap_text=True)
+A_R = Alignment(horizontal='right', vertical='center')
+A_RT = Alignment(horizontal='right', vertical='top')
+UNLOCK = Protection(locked=False)
+
+
+def put(ws, ref, value=None, font=None, fill=None, border=None, align=None, fmt=None,
+        unlocked=False):
+    c = ws[ref]
+    if value is not None:
+        c.value = value
+    if font is not None:
+        c.font = font
+    if fill is not None:
+        c.fill = fill
+    if border is not None:
+        c.border = border
+    if align is not None:
+        c.alignment = align
+    if fmt is not None:
+        c.number_format = fmt
+    if unlocked:
+        c.protection = UNLOCK
+    return c
+
+
+def header(ws, ref, text, size=10):
+    put(ws, ref, text, F(size, True, color='FFFFFF'), FILL(GREEN), B_BOX, A_CW)
+
+
+def widths(ws, spec):
+    for col, w in spec.items():
+        ws.column_dimensions[col].width = w
+
+
+def protect(ws, allow_sort=False, allow_filter=False, objects=False):
+    p = ws.protection
+    p.sheet = True
+    p.sort = not allow_sort              # True = blocked
+    p.autoFilter = not allow_filter
+    p.formatColumns = False              # resizing columns/rows allowed
+    p.formatRows = False
+    p.formatCells = False
+    p.insertRows = p.deleteRows = p.insertColumns = p.deleteColumns = True
+    p.objects = objects
+
+
+def page(ws, landscape=False, fit_height=0, area=None, titles=None):
+    ws.page_setup.orientation = 'landscape' if landscape else 'portrait'
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = fit_height
+    if area:
+        ws.print_area = area
+    if titles:
+        ws.print_title_rows = titles
+
+
+def add_name(wb, name, ref):
+    dn = DefinedName(name, attr_text=ref)
+    try:
+        wb.defined_names[name] = dn              # openpyxl 3.1 and later
+    except Exception:
+        wb.defined_names.append(dn)              # openpyxl 3.0.x
+
+
+def cf(ws, rng, formula, fill=None, font=None, stop=False):
+    ws.conditional_formatting.add(rng, FormulaRule(formula=[formula], stopIfTrue=stop,
+                                                   fill=FILL(fill) if fill else None, font=font))
+
+
+def dv_list(ws, rng, source, title, msg, style='stop'):
+    dv = DataValidation(type='list', formula1=source, allow_blank=True, showErrorMessage=True,
+                        errorStyle=style, errorTitle=title, error=msg)
+    dv.add(rng)
+    ws.add_data_validation(dv)
+
+
+def dv_num(ws, rng, kind, lo, hi, title, msg, style='stop'):
+    dv = DataValidation(type=kind, operator='between', formula1=str(lo), formula2=str(hi),
+                        allow_blank=True, showErrorMessage=True, errorStyle=style,
+                        errorTitle=title, error=msg)
+    dv.add(rng)
+    ws.add_data_validation(dv)
+
+
+# ---- charts
+def _cp(sz, b=False):
+    return CharacterProperties(latin=DFont(typeface='Arial'), sz=sz, b=b)
+
+
+def chart_txt(sz=900):
+    cp = _cp(sz)
+    return RichText(p=[Paragraph(pPr=ParagraphProperties(defRPr=cp), endParaRPr=cp)])
+
+
+def chart_title(text):
+    cp = _cp(1100, True)
+    para = Paragraph(pPr=ParagraphProperties(defRPr=cp), r=[RegularTextRun(rPr=cp, t=text)])
+    return Title(tx=Text(rich=RichText(p=[para])), overlay=False)
+
+
+def bar_chart(ws, title, min_col, colors, anchor):
+    ch = BarChart()
+    ch.type, ch.grouping = 'col', 'clustered'
+    ch.add_data(Reference(ws, min_col=min_col, max_col=min_col + 1, min_row=30, max_row=42),
+                titles_from_data=True)
+    ch.set_categories(Reference(ws, min_col=2, min_row=31, max_row=42))
+    ch.title = chart_title(title)
+    ch.legend.position = 'b'
+    ch.legend.txPr = chart_txt()
+    ch.x_axis.delete = False
+    ch.y_axis.delete = False
+    ch.x_axis.txPr = chart_txt()
+    ch.y_axis.txPr = chart_txt()
+    ch.y_axis.scaling.min = 0
+    ch.gapWidth = 60
+    ch.width, ch.height = 14.2, 8.0
+    for s, col in zip(ch.series, colors):
+        s.graphicalProperties = GraphicalProperties(solidFill=col, ln=LineProperties(solidFill=col))
+    ws.add_chart(ch, anchor)
+
+
+# ================================================================ text blocks
+GUIDE = [
+    ('h', '1 \xb7 ONE-TIME SETUP'),
+    ('b', 'Setup tab \u2192 list every Team + Sub Team pair (one row per pair, no gaps). These feed the '
+          'Employee Master dropdowns and the Dashboard filters.'),
+    ('b', 'Setup tab \u2192 Holidays are shaded amber on every month tab; Years fill the Dashboard\'s Year '
+          'dropdown. Edit both to match your office calendar.'),
+    ('b', 'Codes tab \u2192 your six codes are pre-loaded. "Counts as" decides which total a code adds to; '
+          '"Shift" tags Early Morning / Late Evening. Rows 10\u201315 are spare slots, each with its own colour.'),
+    ('b', f'Employee Master \u2192 one row per employee, up to {N_EMP} (row 5 is an example \u2014 overwrite it). '
+          'Pick Team and Sub Team from the dropdowns; a blank Status counts as Active.'),
+    ('h', '2 \xb7 MARKING ATTENDANCE'),
+    ('b', 'Open the month tab (e.g. Oct-2026) and pick a code in each day cell from the dropdown, or '
+          'type / paste it. Anything that isn\'t a valid code turns red.'),
+    ('b', 'Header colours: dark = weekend \xb7 amber = holiday \xb7 grey = not a date in this month '
+          '(anything typed there is ignored).'),
+    ('b', 'Rows 4\u20137 show the daily headcount. Columns AL\u2013AQ total each employee\'s month; row 8 above '
+          'them totals only the rows currently visible, so it follows the filters in row 9.'),
+    ('h', '3 \xb7 DASHBOARD'),
+    ('b', 'Choose Year, Month, Team and Sub Team in the yellow boxes. Month = All shows the whole year '
+          'in the cards; the table always lists all 12 months, with a link to each tab.'),
+    ('b', 'Present = codes whose "Counts as" is Present (RT_1, RT_EM, RT_LE by default). Leave = '
+          '"Leave" (RT_0). Both are person-days. Attendance % = Present \xf7 (Present + Leave).'),
+    ('b', 'Early Morning / Late Evening = number of RT_EM / RT_LE shifts (they are also part of '
+          'Present). The Employees card counts active employees in the selected Team / Sub Team.'),
+    ('h', '4 \xb7 RULES THAT KEEP THE NUMBERS RIGHT'),
+    ('b', 'Row N of Employee Master is row N on every month tab. Don\'t sort, cut/paste or delete '
+          'employee rows (sheet protection blocks sorting and deleting).'),
+    ('b', 'Leaver \u2192 set Status to Inactive (their history stays). Joiner \u2192 use the next empty row.'),
+    ('b', 'Team change \u2192 the new team applies to every month. To keep past months under the old '
+          'team, mark the old row Inactive and add the person again in a new row.'),
+    ('b', 'Keep month tab names as Mon-YYYY (e.g. Jan-2027): the Dashboard finds tabs by name. Its '
+          'Check column confirms each tab\'s Year and Month (cells B2 and B3).'),
+    ('b', 'To retire a code, clear its cells on the Codes tab rather than deleting the row.'),
+    ('h', f'5 \xb7 ADDING A NEW YEAR (e.g. {NEXT})'),
+    ('n1', f'Setup \u2192 add {NEXT} under Years (and its holidays).'),
+    ('n2', f'Click the Jan-{LAST} tab, Shift+click Dec-{LAST}, right-click \u2192 Move or Copy \u2192 choose '
+           '(move to end) \u2192 tick "Create a copy" \u2192 OK.'),
+    ('n3', f'On each new tab: rename it to Mon-{NEXT} (e.g. Jan-{NEXT}), set Year in B2 to {NEXT}, then '
+           f'select G{G0}:AK{G1} and press Delete.'),
+    ('n4', 'Done \u2014 the Dashboard picks up the new tabs automatically.'),
+    ('h', '6 \xb7 GOOD TO KNOW'),
+    ('b', 'Sheets are protected without a password, only to prevent accidental sorting or deleting. '
+          'Review \u2192 Unprotect Sheet if you need to change the layout.'),
+    ('b', f'Light-yellow cells are inputs, and so are the month grids (G{G0}:AK{G1}). Everything else '
+          'is calculated.'),
+    ('b', 'No macros and no Microsoft 365-only functions, so it runs in any desktop Excel from '
+          '2010 onwards.'),
+]
+CODE_NOTES = [
+    ('HOW CODES ARE COUNTED', True),
+    ('Counts as \u2014 decides which total a code adds to on every month tab and the Dashboard: '
+     'Present, Leave, Holiday, Week Off or Other (Other is not counted).', False),
+    ('Shift \u2014 tags Early Morning / Late Evening codes. They are counted as shifts and also in '
+     'Present, because their Counts as = Present.', False),
+    ('Rows 10\u201315 are spare slots, each with its own colour. Type a code + meaning and pick Counts '
+     'as: it appears in every dropdown and gets that colour automatically.', False),
+    ('To retire a code, clear its cells rather than deleting the row. Renaming a code does not '
+     'change entries already typed on the month tabs.', False),
+]
+DASH_NOTES = [
+    'Present = codes whose "Counts as" is Present on the Codes tab (RT_1, RT_EM, RT_LE by default)  \xb7  '
+    'Leave = "Leave" (RT_0)  \xb7  all counts are person-days.',
+    'Early Morning / Late Evening = number of shift codes tagged on the Codes tab (RT_EM / RT_LE); '
+    'they are also part of Present.  Attendance % = Present \xf7 (Present + Leave).',
+    'Figures come from each month tab\'s per-employee totals (columns AL\u2013AQ), found by tab name '
+    '(Mon-YYYY). Employees = active rows in Employee Master for the selected Team / Sub Team.',
+]
+WARN = ('=IF(NOT(OR(SubSel="All",AND(TeamSel="All",COUNTIF(SetupSub,SubSel)>0),'
+        'COUNTIFS(SetupTeam,TeamSel,SetupSub,SubSel)>0)),'
+        '"\u26a0 This Sub Team isn\'t under the selected Team \u2014 set Sub Team to All",'
+        'IF(COUNTIF($J$31:$J$42,"No tab yet")=12,'
+        '"\u26a0 No month tabs for "&YearSel&" yet \u2014 see the Guide, section 5",""))')
+
+
+# ================================================================ sheets
+def build_dashboard(wb, sel):
+    ws = wb.create_sheet('Dashboard')
+    ws.sheet_properties.tabColor = TAB['dash']
+    ws.sheet_view.showGridLines = False
+    w = {'A': 2, 'N': 2}
+    w.update({c: 12.5 for c in 'BCDEFGHIJLM'})
+    w['K'] = 15
+    widths(ws, w)
+    for c in 'PQ':
+        ws.column_dimensions[c].hidden = True
+    put(ws, 'B1', 'Attendance Dashboard', F(18, True, color=GREEN), align=A_L)
+    ws.row_dimensions[1].height = 30
+    put(ws, 'B2', '="Year "&YearSel&"   \xb7   "&IF(MonthSel="All","All months",MonthSel)'
+                  '&"   \xb7   Team: "&TeamSel&"   \xb7   Sub Team: "&SubSel', F(10, color=MUTED), align=A_L)
+    y, mo, t, s = sel
+    for c1, c2, lab, val, src, word in [('B', 'C', 'YEAR', y, 'YearList', 'year'),
+                                        ('D', 'E', 'MONTH', mo, 'MonthListAll', 'month'),
+                                        ('F', 'G', 'TEAM', t, 'TeamListDash', 'team'),
+                                        ('H', 'I', 'SUB TEAM', s, 'SubTeamListDash', 'sub team')]:
+        put(ws, f'{c1}4', lab, F(8, True, color=MUTED), align=A_L)
+        ws.merge_cells(f'{c1}5:{c2}5')
+        for c in (c1, c2):
+            put(ws, f'{c}5', None, F(11, True), FILL(INPUT), B_BOX, A_C, '0', unlocked=True)
+        ws[f'{c1}5'].value = val
+        dv_list(ws, f'{c1}5', src, 'Pick from the list', f'Choose a {word} from the dropdown.')
+    ws.row_dimensions[5].height = 24
+    ws.merge_cells('J5:M5')
+    put(ws, 'J5', WARN, F(9, True, color='C0392B'), align=A_LW)
+    put(ws, 'B6', 'Pick filters in the yellow boxes  \xb7  Month = All shows the whole year in the cards  \xb7  '
+                  'Team and Sub Team lists come from the Setup tab', F(8, italic=True, color=MUTED), align=A_L)
+
+    def kpi(col):
+        return (f'=IFERROR(IF(MonthSel="All",${col}$43,'
+                f'INDEX(${col}$31:${col}$42,MATCH(MonthSel,$B$31:$B$42,0))),0)')
+
+    def cap(unit):
+        return f'=IF(MonthSel="All","{unit} \xb7 all of "&YearSel,"{unit} \xb7 "&MonthSel&" "&YearSel)'
+
+    emp = ('=SUMPRODUCT((MasterID<>"")*(MasterStatus<>"Inactive")'
+           '*(((TeamSel="All")+(MasterTeam=TeamSel))>0)*(((SubSel="All")+(MasterSub=SubSel))>0))')
+    cards = [('B', 'C', 'EMPLOYEES', emp, 'active in Employee Master', '1F2937', '#,##0'),
+             ('D', 'E', 'PRESENT', kpi('C'), cap('person-days'), '2F5597', '#,##0'),
+             ('F', 'G', 'LEAVE', kpi('D'), cap('person-days'), 'C55A11', '#,##0'),
+             ('H', 'I', 'EARLY MORNING', kpi('E'), cap('shifts'), '1B7F6E', '#,##0'),
+             ('J', 'K', 'LATE EVENING', kpi('F'), cap('shifts'), '6B4FA0', '#,##0'),
+             ('L', 'M', 'ATTENDANCE %', '=IF(D8+F8=0,"\u2013",D8/(D8+F8))', 'present \xf7 (present + leave)',
+              '1F7A3F', '0.0%')]
+    for c1, c2, lab, formula, capt, color, fmt in cards:
+        for r in (7, 8, 9):
+            ws.merge_cells(f'{c1}{r}:{c2}{r}')
+            for c in (c1, c2):
+                cell = ws[f'{c}{r}']
+                cell.fill = FILL('F4F7F5')
+                cell.border = Border(left=S_BOX if c == c1 else Side(),
+                                     right=S_BOX if c == c2 else Side(),
+                                     top=Side(style='thick', color=color) if r == 7 else Side(),
+                                     bottom=S_BOX if r == 9 else Side())
+        put(ws, f'{c1}7', lab, F(8, True, color=MUTED), align=A_C)
+        put(ws, f'{c1}8', formula, F(20, True, color=color), align=A_C, fmt=fmt)
+        put(ws, f'{c1}9', capt, F(8, color=MUTED), align=A_C)
+    ws.row_dimensions[7].height = 20
+    ws.row_dimensions[8].height = 34
+    ws.row_dimensions[9].height = 18
+
+    # month-wise table (rows 30-43) -- charts read from it
+    put(ws, 'B29', '="Month-wise summary  \xb7  "&YearSel&"  \xb7  "&IF(TeamSel="All","All teams",TeamSel)'
+                   '&IF(SubSel="All",""," / "&SubSel)', F(12, True, color=GREEN), align=A_L)
+    ws.row_dimensions[29].height = 22
+    for c, h in zip('BCDEFGHIJK', ['Month', 'Present', 'Leave', 'Early Morning', 'Late Evening',
+                                   'Holiday', 'Week Off', 'Attendance %', 'Tab', 'Check']):
+        header(ws, f'{c}30', h, 9)
+    ws.row_dimensions[30].height = 28
+    for i in range(12):
+        r = 31 + i
+        band = FILL('FFFFFF' if i % 2 == 0 else 'F7F9F8')
+        put(ws, f'B{r}', MON[i], F(10, True), band, B_GRID, A_C)
+        ws[f'P{r}'] = f'="\'"&$B{r}&"-"&YearSel&"\'!"'
+        ws[f'Q{r}'] = i + 1
+        for c, src in zip('CDEFGH', SUMC):
+            put(ws, f'{c}{r}',
+                f'=IFERROR(SUMIFS(INDIRECT($P{r}&"${src}${G0}:${src}${G1}"),'
+                f'INDIRECT($P{r}&"$D${G0}:$D${G1}"),TeamCrit,'
+                f'INDIRECT($P{r}&"$E${G0}:$E${G1}"),SubCrit),0)',
+                F(10), band, B_GRID, A_C, FMT_CNT)
+        put(ws, f'I{r}', f'=IF(C{r}+D{r}=0,"\u2013",C{r}/(C{r}+D{r}))', F(10), band, B_GRID, A_C, '0.0%')
+        put(ws, f'J{r}', f'=IF(ISREF(INDIRECT($P{r}&"A1")),HYPERLINK("#"&$P{r}&"A1",'
+                         f'$B{r}&"-"&YearSel&" \u2192"),"No tab yet")', F(9, color='2F5597'), band, B_GRID, A_C)
+        put(ws, f'K{r}', f'=IF(ISREF(INDIRECT($P{r}&"A1")),IF(AND(INDIRECT($P{r}&"B2")=YearSel,'
+                         f'INDIRECT($P{r}&"B3")=$Q{r}),"\u2713","\u26a0 Check B2/B3"),"")',
+            F(10, True, color='1F7A3F'), band, B_GRID, A_C)
+    tb = Border(top=Side(style='medium', color=GREEN), bottom=S_BOX, left=S_GRID, right=S_GRID)
+    put(ws, 'B43', 'Total', F(10, True), FILL(GREEN_L), tb, A_C)
+    for c in 'CDEFGH':
+        put(ws, f'{c}43', f'=SUM({c}31:{c}42)', F(10, True), FILL(GREEN_L), tb, A_C, FMT_CNT)
+    put(ws, 'I43', '=IF(C43+D43=0,"\u2013",C43/(C43+D43))', F(10, True), FILL(GREEN_L), tb, A_C, '0.0%')
+    put(ws, 'J43', None, F(9), FILL(GREEN_L), tb, A_C)
+    put(ws, 'K43', '=COUNTIF(K31:K42,"\u2713")&" of 12 \u2713"', F(9, True, color=MUTED), FILL(GREEN_L), tb, A_C)
+    for k, text in enumerate(DASH_NOTES):
+        r = 45 + k
+        ws.merge_cells(f'B{r}:M{r}')
+        put(ws, f'B{r}', text, F(8, italic=True, color=MUTED), align=A_LW)
+        ws.row_dimensions[r].height = 22
+    bar_chart(ws, 'Present vs Leave by month (person-days)', 3, ['4F81BD', 'E3A33B'], 'B12')
+    bar_chart(ws, 'Early Morning vs Late Evening shifts by month', 5, ['3AA394', '8E7CC3'], 'H12')
+    cf(ws, 'B31:K42', 'AND(MonthSel<>"All",$B31=MonthSel)', fill='FFF2CC')
+    cf(ws, 'K31:K42', 'LEFT(K31,1)="\u26a0"', font=CFF(True, color='C55A11'))
+    cf(ws, 'J31:J42', 'J31="No tab yet"', font=CFF(False, True, '9CA3AF'))
+    ws.freeze_panes = 'A6'
+    page(ws, landscape=True, fit_height=1, area='A1:M47')
+    ws.sheet_view.tabSelected = True
+    protect(ws, objects=True)
+
+
+def build_guide(wb):
+    ws = wb.create_sheet('Guide')
+    ws.sheet_properties.tabColor = TAB['cfg']
+    ws.sheet_view.showGridLines = False
+    widths(ws, {'A': 2, 'B': 4, 'C': 112})
+    put(ws, 'B1', 'How to use this tracker', F(16, True, color=GREEN), align=A_L)
+    ws.row_dimensions[1].height = 28
+    r = 3
+    for kind, text in GUIDE:
+        if kind == 'h':
+            if r > 3:
+                r += 1
+            ws.merge_cells(f'B{r}:C{r}')
+            for c in 'BC':
+                put(ws, f'{c}{r}', None, F(10, True, color='FFFFFF'), FILL(GREEN), None, A_L)
+            ws[f'B{r}'].value = text
+            ws.row_dimensions[r].height = 20
+        else:
+            put(ws, f'B{r}', '\u2022' if kind == 'b' else kind[1:] + '.', F(10, True, color=GREEN), align=A_RT)
+            put(ws, f'C{r}', text, F(10), align=A_LT)
+            ws.row_dimensions[r].height = 14 * max(1, -(-len(text) // 118)) + 3
+        r += 1
+    page(ws)
+
+
+def build_master(wb):
+    ws = wb.create_sheet('Employee Master')
+    ws.sheet_properties.tabColor = TAB['master']
+    ws.sheet_view.showGridLines = False
+    widths(ws, {'A': 5, 'B': 12, 'C': 26, 'D': 18, 'E': 18, 'F': 22, 'G': 11, 'H': 28})
+    put(ws, 'A1', 'Employee Master', F(14, True, color=GREEN), align=A_L)
+    ws.row_dimensions[1].height = 22
+    ws.merge_cells('A2:G2')
+    put(ws, 'A2', (f'One row per employee \u2014 space for {N_EMP}. Yellow cells are inputs; row 5 is an example: '
+                   'overwrite it. Don\'t sort, cut/paste or delete rows \u2014 row N here is row N on every month '
+                   'tab. Leavers \u2192 set Status to Inactive.'), F(9, italic=True, color=MUTED), align=A_LW)
+    ws.row_dimensions[2].height = 26
+    put(ws, 'A3', '="Active: "&COUNTIFS(MasterID,"<>",MasterStatus,"<>Inactive")&"    \xb7    Inactive: "'
+                  '&COUNTIFS(MasterID,"<>",MasterStatus,"Inactive")&"    \xb7    Free rows: "&COUNTBLANK(MasterID)',
+        F(9, True, color=GREEN), align=A_L)
+    for col, h in zip('ABCDEFG', ['#', 'ID', 'Employee Name', 'Team', 'Sub Team', 'Manager', 'Status']):
+        header(ws, f'{col}4', h)
+    ws.row_dimensions[4].height = 20
+    emps = {0: EXAMPLE_EMPLOYEE} if EXAMPLE_EMPLOYEE else {}
+    for i in range(N_EMP):
+        r = M0 + i
+        put(ws, f'A{r}', i + 1, F(8, color=MUTED), None, B_GRID, A_C)
+        vals = emps.get(i, (None,) * 6)
+        for j, col in enumerate('BCDEFG'):
+            v = vals[j] if vals[j] != '' else None
+            put(ws, f'{col}{r}', v, F(10), FILL(INPUT), B_GRID, A_C if col in 'BG' else A_L, unlocked=True)
+    if EXAMPLE_EMPLOYEE:
+        put(ws, 'H5', '\u2190 example row \u2014 overwrite', F(9, italic=True, color=MUTED), align=A_L)
+    dv_list(ws, f'D{M0}:D{M1}', 'TeamList', 'Team not in Setup',
+            'Pick a team from the list, or add it on the Setup tab first.', 'warning')
+    dv_list(ws, f'E{M0}:E{M1}', 'SubTeamList', 'Sub Team not in Setup',
+            'Pick a sub team from the list, or add the Team + Sub Team pair on the Setup tab first.', 'warning')
+    dv_list(ws, f'G{M0}:G{M1}', 'StatusList', 'Status', 'Choose Active or Inactive (blank = Active).')
+    cf(ws, f'B{M0}:B{M1}', f'AND($B{M0}<>"",COUNTIF($B${M0}:$B${M1},$B{M0})>1)', fill='E74C3C',
+       font=CFF(True, color='FFFFFF'))
+    cf(ws, f'D{M0}:D{M1}', f'AND($D{M0}<>"",COUNTIF(SetupTeam,$D{M0})=0)', fill='F8CBAD')
+    cf(ws, f'E{M0}:E{M1}', f'AND($E{M0}<>"",COUNTIFS(SetupTeam,$D{M0},SetupSub,$E{M0})=0)', fill='F8CBAD')
+    cf(ws, f'A{M0}:G{M1}', f'$G{M0}="Inactive"', fill='EDEDED', font=CFF(False, True, '8C8C8C'))
+    ws.freeze_panes = 'A5'
+    ws.auto_filter.ref = f'A4:G{M1}'
+    page(ws, titles='4:4')
+    protect(ws, allow_filter=True)
+
+
+def build_setup(wb):
+    ws = wb.create_sheet('Setup')
+    ws.sheet_properties.tabColor = TAB['cfg']
+    ws.sheet_view.showGridLines = False
+    widths(ws, {'A': 2, 'B': 24, 'C': 24, 'D': 3, 'E': 14, 'F': 28, 'G': 3, 'H': 10})
+    put(ws, 'B1', 'Setup', F(14, True, color=GREEN), align=A_L)
+    ws.row_dimensions[1].height = 22
+    ws.merge_cells('B2:H2')
+    put(ws, 'B2', ('Lists behind the dropdowns and Dashboard filters. Yellow cells are inputs \u2014 fill each list '
+                   'from the top, without gaps. Row 6 is an example pair used by the example employee: overwrite it.'),
+        F(9, italic=True, color=MUTED), align=A_LW)
+    ws.row_dimensions[2].height = 26
+    put(ws, 'B4', 'TEAMS & SUB TEAMS \u2014 one row per pair', F(8, True, color=MUTED))
+    put(ws, 'E4', 'HOLIDAYS \u2014 shaded on month tabs', F(8, True, color=MUTED))
+    put(ws, 'H4', 'YEARS', F(8, True, color=MUTED))
+    for ref, h in [('B5', 'Team'), ('C5', 'Sub Team'), ('E5', 'Date'), ('F5', 'Holiday'), ('H5', 'Year')]:
+        header(ws, ref, h)
+    teams = SETUP_PAIRS
+    for i in range(100):
+        r = 6 + i
+        t, s = teams[i] if i < len(teams) else (None, None)
+        put(ws, f'B{r}', t, F(10), FILL(INPUT), B_GRID, A_L, unlocked=True)
+        put(ws, f'C{r}', s, F(10), FILL(INPUT), B_GRID, A_L, unlocked=True)
+    for i in range(50):
+        r = 6 + i
+        d, n = HOLIDAYS[i] if i < len(HOLIDAYS) else (None, None)
+        put(ws, f'E{r}', d, F(10), FILL(INPUT), B_GRID, A_C, 'dd-mmm-yyyy', unlocked=True)
+        put(ws, f'F{r}', n, F(10), FILL(INPUT), B_GRID, A_L, unlocked=True)
+    for i in range(35):
+        put(ws, f'H{6 + i}', YEARS[i] if i < len(YEARS) else None, F(10), FILL(INPUT), B_GRID, A_C, '0',
+            unlocked=True)
+    cf(ws, 'B6:C105', 'AND($C6<>"",COUNTIFS($B$6:$B$105,$B6,$C$6:$C$105,$C6)>1)', fill='E74C3C',
+       font=CFF(True, color='FFFFFF'))
+    cf(ws, 'B6:C105', 'AND($C6<>"",$B6="")', fill='F8CBAD')
+    dv_num(ws, 'E6:E55', 'date', 36526, 73415, 'Date', 'Enter a date, e.g. 26-Jan-2027.', 'warning')
+    dv_num(ws, 'H6:H40', 'whole', 2000, 2100, 'Year', 'Enter a 4-digit year, e.g. 2028.')
+    ws.freeze_panes = 'A6'
+    page(ws)
+    protect(ws, allow_sort=True)
+
+
+def build_codes(wb):
+    ws = wb.create_sheet('Codes')
+    ws.sheet_properties.tabColor = TAB['cfg']
+    ws.sheet_view.showGridLines = False
+    widths(ws, {'A': 2, 'B': 12, 'C': 34, 'D': 14, 'E': 16, 'F': 2})
+    put(ws, 'B2', 'Leave & Attendance Codes', F(14, True, color=GREEN), align=A_L)
+    ws.row_dimensions[2].height = 22
+    for col, h in zip('BCDE', ['Code', 'Meaning', 'Counts as', 'Shift']):
+        header(ws, f'{col}3', h)
+    ws.row_dimensions[3].height = 20
+    for k in range(12):
+        r = 4 + k
+        code, meaning, cat, shift = CODES[k] if k < len(CODES) else (None, None, None, None)
+        put(ws, f'B{r}', code, F(10, True), FILL(SLOT[k]), B_BOX, A_C, unlocked=True)
+        put(ws, f'C{r}', meaning, F(10), FILL(INPUT), B_BOX, A_C, unlocked=True)
+        put(ws, f'D{r}', cat, F(10), FILL(INPUT), B_BOX, A_C, unlocked=True)
+        put(ws, f'E{r}', shift or None, F(10), FILL(INPUT), B_BOX, A_C, unlocked=True)
+        ws.row_dimensions[r].height = 18
+    dv_list(ws, 'D4:D15', 'CategoryList', 'Counts as', 'Pick Present, Leave, Holiday, Week Off or Other.')
+    dv_list(ws, 'E4:E15', 'ShiftList', 'Shift', 'Pick Early Morning or Late Evening, or leave blank.')
+    cf(ws, 'B4:B15', 'AND($B4<>"",COUNTIF($B$4:$B$15,$B4)>1)', fill='E74C3C', font=CFF(True, color='FFFFFF'))
+    cf(ws, 'D4:D15', 'AND($B4<>"",$D4="")', fill='F8CBAD')
+    for i, (text, bold) in enumerate(CODE_NOTES):
+        r = 17 + i
+        ws.merge_cells(f'B{r}:E{r}')
+        put(ws, f'B{r}', text, F(9, bold, color=GREEN if bold else MUTED), align=A_LW)
+        ws.row_dimensions[r].height = 16 if bold else 26
+    page(ws)
+    protect(ws)
+
+
+def build_month(wb, year, m, grid=None):
+    ws = wb.create_sheet(f'{MON[m - 1]}-{year}')
+    ws.sheet_properties.tabColor = YEAR_TAB[YEARS.index(year) % 2]
+    ws.sheet_view.showGridLines = False
+    ws.sheet_view.zoomScale = 90
+    w = {'A': 4.5, 'B': 10, 'C': 24, 'D': 14, 'E': 14, 'F': 16}
+    w.update({c: 6.2 for c in DAYC})
+    w.update({c: 9.5 for c in SUMC})
+    widths(ws, w)
+    # --- header block
+    ws.merge_cells('A1:F1')
+    put(ws, 'A1', '=IFERROR(INDEX(MonthNames,$B$3)&" "&$B$2,"Check Year/Month")&"  \xb7  Attendance"',
+        F(14, True, color=GREEN), align=A_L)
+    ws.row_dimensions[1].height = 24
+    put(ws, 'A2', 'Year', F(9, True, color=MUTED), align=A_R)
+    put(ws, 'B2', year, F(10, True), FILL(INPUT), B_BOX, A_C, '0', unlocked=True)
+    put(ws, 'C2', '=HYPERLINK("#Dashboard!A1","\u2302 Back to Dashboard")',
+        F(9, color='2F5597', underline='single'), align=A_L)
+    put(ws, 'A3', 'Month', F(9, True, color=MUTED), align=A_R)
+    put(ws, 'B3', m, F(10, True), FILL(INPUT), B_BOX, A_C, '0', unlocked=True)
+    put(ws, 'C3', 'tab settings \u2014 change only when copying tabs for a new year',
+        F(8, italic=True, color=MUTED), align=A_L)
+    put(ws, 'F2', 'Codes \u2192', F(8, True, color=MUTED), align=A_R)
+    for k in range(12):
+        put(ws, f'{DAYC[k]}2', f'=IF(code_{k + 1}="","",code_{k + 1})', F(8, True), FILL(SLOT[k]), B_GRID, A_C)
+    ws.merge_cells(f'G3:{DAYC[-1]}3')
+    put(ws, 'G3', 'Pick a code from the dropdown in each day cell  \xb7  invalid entries turn red  \xb7  dark header '
+                  '= weekend  \xb7  amber = holiday  \xb7  grey = not a date in this month',
+        F(8, italic=True, color=MUTED), align=A_L)
+    # --- daily headcount rows 4-7
+    for i, (lab, rng) in enumerate([('Present', 'CatRange'), ('Leave', 'CatRange'),
+                                    ('Early Morning', 'ShiftRange'), ('Late Evening', 'ShiftRange')]):
+        r = 4 + i
+        ws.merge_cells(f'C{r}:F{r}')
+        for c in 'CDEF':
+            put(ws, f'{c}{r}', None, F(8, True, color='595959'), FILL(GREY_L), B_GRID, A_R, '@" / day"')
+        ws[f'C{r}'].value = lab
+        for c in DAYC:
+            put(ws, f'{c}{r}', f'=IF({c}$9="","",SUMPRODUCT(COUNTIFS(CodeRange,{c}${G0}:{c}${G1},{rng},$C{r})'
+                               f'*({c}${G0}:{c}${G1}<>"")*($B${G0}:$B${G1}<>"")))',
+                F(8, color='404040'), None, B_GRID, A_C, '0;-0;;@')
+    # --- month totals (row 7-8, right) and day headers (rows 8-9)
+    ws.merge_cells(f'{SUMC[0]}7:{SUMC[-1]}7')
+    for c in SUMC:
+        put(ws, f'{c}7', None, F(8, True, color='595959'), FILL(GREY_L), B_GRID, A_C)
+        put(ws, f'{c}8', f'=SUBTOTAL(9,{c}{G0}:{c}{G1})', F(9, True), FILL(GREY_L), B_GRID, A_C, FMT_CNT)
+    ws[f'{SUMC[0]}7'].value = 'Month total (visible rows)'
+    for i, c in enumerate(DAYC):
+        put(ws, f'{c}8', f'=IF({c}9="","",{c}9)', F(8, color='374151'), FILL(GREEN_L), B_GRID, A_C, 'ddd')
+        p = DAYC[i - 1]
+        f9 = '=DATE($B$2,$B$3,1)' if i == 0 else f'=IF({p}9="","",IF(MONTH({p}9+1)=$B$3,{p}9+1,""))'
+        put(ws, f'{c}9', f9, F(9, True), FILL(GREEN_L), B_GRID, A_C, 'd')
+    for c, h in zip('ABCDEF', ['#', 'ID', 'Employee Name', 'Team', 'Sub Team', 'Manager']):
+        header(ws, f'{c}9', h, 9)
+    for c, h in zip(SUMC, SUM_LABELS):
+        header(ws, f'{c}9', h, 9)
+    ws.row_dimensions[9].height = 30
+    # --- employee rows: style row G0 once, copy the style arrays to the other rows (fast)
+    protos = {}
+
+    def proto(ci, **kw):
+        cell = ws.cell(row=G0, column=ci)
+        put(ws, cell.coordinate, **kw)
+        protos[ci] = cell._style
+
+    proto(1, font=F(8, color=MUTED), border=B_GRID, align=A_C)
+    proto(2, font=F(9), border=B_GRID, align=A_C)
+    for ci in (3, 4, 5, 6):
+        proto(ci, font=F(9), border=B_GRID, align=A_L)
+    for ci in range(DAY0, DAY0 + 31):
+        proto(ci, font=F(9), border=B_GRID, align=A_C, unlocked=True)
+    for ci in range(38, 44):
+        proto(ci, font=F(9), fill=FILL('F7F7F7'), border=B_GRID, align=A_C, fmt=FMT_CNT)
+    for i in range(N_EMP):
+        r = G0 + i
+        vals = {1: i + 1,
+                2: f'=IF(INDEX(MasterID,$A{r})="","",INDEX(MasterID,$A{r}))',
+                3: f'=INDEX(MasterName,$A{r})&""', 4: f'=INDEX(MasterTeam,$A{r})&""',
+                5: f'=INDEX(MasterSub,$A{r})&""', 6: f'=INDEX(MasterMgr,$A{r})&""'}
+        codes = grid.get(i) if grid else None
+        if codes:
+            for d, code in enumerate(codes[:31]):
+                if code:
+                    vals[DAY0 + d] = code
+        for k, (sc, rng) in enumerate(zip(SUMC, SUM_RANGE)):
+            vals[38 + k] = (f'=IF($B{r}="","",SUMPRODUCT(COUNTIFS(CodeRange,$G{r}:$AK{r},{rng},{sc}$9)'
+                            f'*($G$9:$AK$9<>"")*($G{r}:$AK{r}<>"")))')
+        for ci in range(1, 44):
+            cell = ws.cell(row=r, column=ci)
+            if ci in vals:
+                cell.value = vals[ci]
+            if i:
+                cell._style = copy(protos[ci])
+    # --- conditional formats (added in priority order)
+    body = f'G{G0}:AK{G1}'
+    cf(ws, f'G4:AK{G1}', 'G$9=""', fill='A6A6A6', stop=True)
+    cf(ws, body, f'AND(G{G0}<>"",COUNTIF(CodeRange,G{G0})=0)', fill='E74C3C', font=CFF(True, color='FFFFFF'))
+    for k in range(12):
+        cf(ws, body, f'AND(G{G0}<>"",G{G0}=code_{k + 1})', fill=SLOT[k])
+    cf(ws, 'G8:AK9', 'AND(G$9<>"",COUNTIF(HolidayDates,G$9)>0)', fill='F4B183', font=CFF(True, color='1F2937'))
+    cf(ws, 'G8:AK9', 'AND(G$9<>"",WEEKDAY(G$9,2)>5)', fill='4B5563', font=CFF(True, color='FFFFFF'))
+    cf(ws, body, 'AND(G$9<>"",COUNTIF(HolidayDates,G$9)>0)', fill='FDF1E4')
+    cf(ws, body, 'AND(G$9<>"",WEEKDAY(G$9,2)>5)', fill='F3F3F3')
+    cf(ws, 'G2:R2', 'G2=""', fill='FFFFFF')
+    # --- validation, view, print, protection
+    dv_num(ws, 'B2', 'whole', 2000, 2100, 'Year', 'Enter a 4-digit year, e.g. 2027.')
+    dv_num(ws, 'B3', 'whole', 1, 12, 'Month', 'Enter the month number, 1 to 12.')
+    dv_list(ws, body, 'CodeList', 'Not a valid code',
+            'Pick a code from the dropdown. To add a new code, fill a spare row on the Codes tab.')
+    ws.freeze_panes = f'D{G0}'
+    ws.auto_filter.ref = f'A9:AQ{G1}'
+    page(ws, landscape=True, titles='8:9')
+    protect(ws, allow_filter=True)
+
+
+def build_helper(wb):
+    ws = wb.create_sheet('Helper')
+    ws.sheet_state = 'hidden'
+    put(ws, 'A1', 'Helper \u2014 calculated lists behind the dropdowns and filters. Do not edit.', F(9, True))
+    for ref, v in {'B4': 'team idx', 'C4': 'Teams', 'D4': 'sub idx', 'E4': 'Sub Teams',
+                   'F4': 'dash sub idx', 'G4': 'Sub Teams (dashboard)', 'I4': 'Months', 'J4': 'Month names',
+                   'K4': 'Status', 'L4': 'Counts as', 'M4': 'Shift', 'N4': 'Filter', 'O4': 'Criteria',
+                   'Q4': 'code idx', 'R4': 'Codes'}.items():
+        put(ws, ref, v, F(9, True))
+    for ref in ('B5', 'D5', 'F5', 'Q5'):
+        ws[ref] = 0
+    for ref in ('C5', 'G5', 'I5'):
+        ws[ref] = 'All'
+    for r in range(6, 106):
+        ws[f'B{r}'] = f'=IF(Setup!B{r}="","",IF(COUNTIF(Setup!$B$6:B{r},Setup!B{r})=1,MAX(B$5:B{r - 1})+1,""))'
+        ws[f'C{r}'] = f'=IFERROR(INDEX(Setup!$B$6:$B$105,MATCH(ROWS(C$6:C{r}),$B$6:$B$105,0)),"")'
+        ws[f'D{r}'] = f'=IF(Setup!C{r}="","",IF(COUNTIF(Setup!$C$6:C{r},Setup!C{r})=1,MAX(D$5:D{r - 1})+1,""))'
+        ws[f'E{r}'] = f'=IFERROR(INDEX(Setup!$C$6:$C$105,MATCH(ROWS(E$6:E{r}),$D$6:$D$105,0)),"")'
+        ws[f'F{r}'] = (f'=IF(Setup!C{r}="","",IF(IF(TeamSel="All",COUNTIF(Setup!$C$6:C{r},Setup!C{r})=1,'
+                       f'AND(Setup!B{r}=TeamSel,COUNTIFS(Setup!$B$6:B{r},Setup!B{r},Setup!$C$6:C{r},'
+                       f'Setup!C{r})=1)),MAX(F$5:F{r - 1})+1,""))')
+        ws[f'G{r}'] = f'=IFERROR(INDEX(Setup!$C$6:$C$105,MATCH(ROWS(G$6:G{r}),$F$6:$F$105,0)),"")'
+    for i in range(12):
+        ws[f'I{6 + i}'] = MON[i]
+        ws[f'J{6 + i}'] = MON_FULL[i]
+    ws['K6'], ws['K7'] = 'Active', 'Inactive'
+    for i, c in enumerate(CATEGORIES):
+        ws[f'L{6 + i}'] = c
+    for i, s in enumerate(SHIFTS):
+        ws[f'M{6 + i}'] = s
+    ws['N6'], ws['O6'] = 'TeamCrit', '=IF(TeamSel="All","<>\xa7\xa7","="&TeamSel)'
+    ws['N7'], ws['O7'] = 'SubCrit', '=IF(SubSel="All","<>\xa7\xa7","="&SubSel)'
+    for r in range(6, 18):
+        ws[f'Q{r}'] = f'=IF(Codes!B{r - 2}="","",MAX(Q$5:Q{r - 1})+1)'
+        ws[f'R{r}'] = f'=IFERROR(INDEX(Codes!$B$4:$B$15,MATCH(ROWS(R$6:R{r}),$Q$6:$Q$17,0)),"")'
+
+
+def add_names(wb):
+    add_name(wb, 'CodeRange', 'Codes!$B$4:$B$15')
+    add_name(wb, 'CatRange', 'Codes!$D$4:$D$15')
+    add_name(wb, 'ShiftRange', 'Codes!$E$4:$E$15')
+    for k in range(12):
+        add_name(wb, f'code_{k + 1}', f'Codes!$B${4 + k}')
+    add_name(wb, 'CodeList', 'OFFSET(Helper!$R$6,0,0,MAX(1,SUMPRODUCT(--(LEN(Helper!$R$6:$R$17)>0))),1)')
+    add_name(wb, 'TeamList', 'OFFSET(Helper!$C$6,0,0,MAX(1,SUMPRODUCT(--(LEN(Helper!$C$6:$C$105)>0))),1)')
+    add_name(wb, 'TeamListDash', 'OFFSET(Helper!$C$5,0,0,SUMPRODUCT(--(LEN(Helper!$C$5:$C$105)>0)),1)')
+    add_name(wb, 'SubTeamList', 'OFFSET(Helper!$E$6,0,0,MAX(1,SUMPRODUCT(--(LEN(Helper!$E$6:$E$105)>0))),1)')
+    add_name(wb, 'SubTeamListDash', 'OFFSET(Helper!$G$5,0,0,SUMPRODUCT(--(LEN(Helper!$G$5:$G$105)>0)),1)')
+    add_name(wb, 'YearList', 'OFFSET(Setup!$H$6,0,0,MAX(1,COUNT(Setup!$H$6:$H$40)),1)')
+    add_name(wb, 'MonthListAll', 'Helper!$I$5:$I$17')
+    add_name(wb, 'MonthNames', 'Helper!$J$6:$J$17')
+    add_name(wb, 'StatusList', 'Helper!$K$6:$K$7')
+    add_name(wb, 'CategoryList', 'Helper!$L$6:$L$10')
+    add_name(wb, 'ShiftList', 'Helper!$M$6:$M$7')
+    add_name(wb, 'HolidayDates', 'Setup!$E$6:$E$55')
+    add_name(wb, 'SetupTeam', 'Setup!$B$6:$B$105')
+    add_name(wb, 'SetupSub', 'Setup!$C$6:$C$105')
+    for nm, col in [('MasterID', 'B'), ('MasterName', 'C'), ('MasterTeam', 'D'), ('MasterSub', 'E'),
+                    ('MasterMgr', 'F'), ('MasterStatus', 'G')]:
+        add_name(wb, nm, f"'Employee Master'!${col}${M0}:${col}${M1}")
+    for nm, ref in [('YearSel', 'B5'), ('MonthSel', 'D5'), ('TeamSel', 'F5'), ('SubSel', 'H5')]:
+        add_name(wb, nm, f'Dashboard!${ref[0]}${ref[1:]}')
+    add_name(wb, 'TeamCrit', 'Helper!$O$6')
+    add_name(wb, 'SubCrit', 'Helper!$O$7')
+
+
+def build(path):
+    wb = Workbook()
+    arial = Font(name='Arial', size=10, family=2)
+    try:                                         # Arial 10 as the workbook's default font
+        wb._fonts = IndexedList([arial])
+        wb._named_styles['Normal'].font = arial
+    except Exception:
+        pass
+    wb.remove(wb.active)
+    build_dashboard(wb, (YEARS[0], 'All', 'All', 'All'))
+    build_guide(wb)
+    build_master(wb)
+    build_setup(wb)
+    build_codes(wb)
+    for y in YEARS:
+        for m in range(1, 13):
+            build_month(wb, y, m)
+    build_helper(wb)
+    add_names(wb)
+    wb.calculation = CalcProperties(fullCalcOnLoad=True)
+    wb.active = 0
+    wb.properties.title = 'Attendance Tracker'
+    wb.properties.creator = 'Attendance Tracker'
+    wb.save(path)
+
+
+# ================================================================ run
+def check_settings():
+    problems = []
+    if not YEARS or len(set(YEARS)) != len(YEARS) or len(YEARS) > 35:
+        problems.append('YEARS must list each year once (at most 35 years), e.g. [2026, 2027]')
+    if not 1 <= N_EMP <= 2000:
+        problems.append('N_EMP must be between 1 and 2000')
+    if len(SETUP_PAIRS) > 100:
+        problems.append('SETUP_PAIRS: at most 100 pairs')
+    if len(YEARS) * len(HOLIDAY_DATES) > 50:
+        problems.append('Holidays: at most 50 dates in total (number of YEARS x HOLIDAY_DATES)')
+    if len(CODES) > 12:
+        problems.append('CODES: at most 12 codes')
+    for code in CODES:
+        if code[2] not in CATEGORIES:
+            problems.append('CODES %s: "counts as" must be one of: %s' % (code[0], ', '.join(CATEGORIES)))
+        if code[3] and code[3] not in SHIFTS:
+            problems.append('CODES %s: shift must be blank or one of: %s' % (code[0], ', '.join(SHIFTS)))
+    if problems:
+        sys.exit('Please fix the SETTINGS at the top of the script:\n  - ' + '\n  - '.join(problems))
+
+
+def main():
+    args = [a for a in sys.argv[1:] if a != '--force']
+    out = args[0] if args else OUTPUT_FILE
+    if not out.lower().endswith('.xlsx'):
+        out += '.xlsx'
+    if os.path.exists(out) and '--force' not in sys.argv[1:]:
+        sys.exit('%s already exists - not overwriting it. Give another file name, or add --force.' % out)
+    check_settings()
+    print('Building %s ...' % out)
+    try:
+        build(out)
+    except PermissionError:
+        sys.exit('Could not save %s - if it is open in Excel, close it and run again.' % out)
+    print('Done: %s' % os.path.abspath(out))
+    print('%d month tabs, %d employee rows. Open it in Excel (formulas calculate on open), then save once.'
+          % (12 * len(YEARS), N_EMP))
+
+
+if __name__ == '__main__':
+    main()
